@@ -1,0 +1,76 @@
+name: Build DE Wrapper
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'src/**'
+      - 'CMakeLists.txt'
+      - 'build.sh'
+      - '.github/workflows/build.yml'
+
+env:
+  DE_LIBS_URL: https://github.com/kattimasen-ops/DE-Port-Test/releases/download/V1/arm64-v8a.zip
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install cross-compiler and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu \
+            cmake \
+            binutils-aarch64-linux-gnu \
+            unzip \
+            file
+
+      - name: Download Dead Effect native libs
+        run: |
+          curl -L -o arm64-v8a.zip "$DE_LIBS_URL"
+          unzip -o arm64-v8a.zip -d de_libs/
+          ls -la de_libs/
+
+      - name: Build wrapper
+        run: |
+          chmod +x build.sh
+          ./build.sh
+
+      - name: Package port for R36S
+        run: |
+          mkdir -p port/DeadEffect/lib
+          cp output/de_wrapper port/DeadEffect/
+          cp de_libs/*.so port/DeadEffect/lib/ 2>/dev/null || true
+          cp de_libs/libmain.so port/DeadEffect/lib/ 2>/dev/null || true
+
+          # Launcher-Skript erstellen
+          cat > port/DeadEffect/start.sh << 'LAUNCHER'
+          #!/bin/bash
+          cd "$(dirname "$0")"
+          export LD_LIBRARY_PATH="./lib:$LD_LIBRARY_PATH"
+          chmod +x de_wrapper
+          ./de_wrapper "$@"
+          LAUNCHER
+          chmod +x port/DeadEffect/start.sh
+
+          cd port && zip -r ../DeadEffect-Wrapper.zip .
+          ls -la ../DeadEffect-Wrapper.zip
+
+      - name: Upload port as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DeadEffect-Wrapper
+          path: DeadEffect-Wrapper.zip
+
+      - name: Upload to Release (bei Tag)
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: DeadEffect-Wrapper.zip
