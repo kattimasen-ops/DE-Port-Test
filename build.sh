@@ -2,7 +2,11 @@
 # ============================================================
 # Dead Effect Wrapper - Cross-Compile fuer RK3326 / ARM64
 # Laeuft im ubuntu:20.04 Container (GLIBC 2.31)
-# Optimiert fuer Cortex-A35 mit LTO
+#
+# WICHTIG:
+#   - mcpelauncher-linker: MUSS mit Clang gebaut werden (AOSP ist
+#     Clang-only). GCC scheitert an C11 _Atomic in Bionic-Headern.
+#   - Wrapper: GCC ist OK (keine Bionic-Header).
 # ============================================================
 set -e
 
@@ -10,7 +14,6 @@ export DEBIAN_FRONTEND=noninteractive
 
 echo "==> Host arch: $(uname -m)"
 echo "==> Ziel: M9 Pro / R36S (RK3326, aarch64, GLIBC 2.31)"
-echo "==> Optimierung: Cortex-A35 + LTO + O3"
 
 # ------------------------------------------------------------
 # 1. Multiarch + apt-Quellen
@@ -33,12 +36,14 @@ rm -f /etc/apt/sources.list
 apt-get update
 
 # ------------------------------------------------------------
-# 2. Cross-Toolchain + ARM64-Zielbibliotheken
+# 2. Cross-Toolchain + Clang + ARM64-Zielbibliotheken
 # ------------------------------------------------------------
-echo "==> Installiere Cross-Toolchain"
+echo "==> Installiere Cross-Toolchain (GCC + Clang)"
 apt-get install -y --no-install-recommends \
   build-essential cmake git pkg-config ca-certificates wget file zip unzip python3 \
   crossbuild-essential-arm64 \
+  clang-12 lld-12 llvm-12 \
+  libc6-dev-arm64-cross \
   libasound2-dev:arm64 \
   libpulse-dev:arm64 \
   libegl1-mesa-dev:arm64 \
@@ -47,8 +52,10 @@ apt-get install -y --no-install-recommends \
   libgbm-dev:arm64 \
   zlib1g-dev:arm64
 
-which aarch64-linux-gnu-gcc
+echo "=== GCC ==="
 aarch64-linux-gnu-gcc --version | head -1
+echo "=== Clang ==="
+clang-12 --version | head -1
 
 # ------------------------------------------------------------
 # 3. Native Bibliotheken herunterladen
@@ -60,42 +67,69 @@ echo "=== Enthaltene Bibliotheken ==="
 find de_libs -name "*.so" -exec ls -la {} \;
 
 # ------------------------------------------------------------
-# 4. mcpelauncher-linker bauen (Bionic-ELF-Loader)
-#    WICHTIG: GCC-Kompatibilitaets-Flags fuer Bionic-Header
-#    Bionic-Header verwenden Clang-Makros (__has_feature,
-#    __has_builtin), die GCC 9 nicht kennt. Wir definieren sie
-#    als Fallback auf 0.
+# 4. mcpelauncher-linker mit CLANG bauen (Bionic-ELF-Loader)
+#    AOSP-Code ist Clang-only. GCC scheitert an C11 _Atomic.
 # ------------------------------------------------------------
-echo "==> Baue mcpelauncher-linker"
+echo "==> Baue mcpelauncher-linker mit Clang"
 LINKER_BUILT=0
 if git clone --depth=1 --recursive https://github.com/minecraft-linux/mcpelauncher-linker.git 2>/dev/null; then
     cd mcpelauncher-linker
     mkdir -p build && cd build
 
-    LINKER_FLAGS="-Wno-error -D__has_feature(x)=0 -D__has_builtin(x)=0 -D__has_attribute(x)=0 -D__has_cpp_attribute(x)=0"
-
+    # Clang Cross-Compile: Target-Triple angeben
     cmake .. \
-      -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
-      -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+      -DCMAKE_C_COMPILER=clang-12 \
+      -DCMAKE_C_COMPILER_TARGET=aarch64-linux-gnu \
+      -DCMAKE_CXX_COMPILER=clang++-12 \
+      -DCMAKE_CXX_COMPILER_TARGET=aarch64-linux-gnu \
       -DCMAKE_SYSTEM_NAME=Linux \
       -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
       -DCMAKE_BUILD_TYPE=Release \
       -DBUILD_SHARED_LIBS=ON \
-      -DCMAKE_C_FLAGS="${LINKER_FLAGS}" \
-      -DCMAKE_CXX_FLAGS="${LINKER_FLAGS}"
+      -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld-12" \
+      -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld-12"
 
     make -j$(nproc)
     cd ../..
-    echo "[OK] mcpelauncher-linker gebaut"
+    echo "[OK] mcpelauncher-linker mit Clang gebaut"
     LINKER_BUILT=1
 else
     echo "[WARN] mcpelauncher-linker konnte nicht geklont werden"
 fi
 
 # ------------------------------------------------------------
-# 5. Wrapper bauen mit LTO + Cortex-A35
+# 4b. GCC-Kompatibilitaets-Header erstellen
+#     (Sicherheitsnetz fuer den Wrapper - wird per -include
+#     eingebunden, nicht per -D, weil CMake keine funktions-
+#     artigen Makros ueber die Kommandozeile uebergeben kann)
 # ------------------------------------------------------------
-echo "==> Baue DE Wrapper mit LTO und Cortex-A35-Optimierung"
+cat > /work/gcc_compat.h <<'EOF'
+/* GCC-Kompatibilitaet fuer Clang-Makros */
+#ifndef GCC_COMPAT_H
+#define GCC_COMPAT_H
+#ifndef __has_feature
+#define __has_feature(x) 0
+#endif
+#ifndef __has_builtin
+#define __has_builtin(x) 0
+#endif
+#ifndef __has_attribute
+#define __has_attribute(x) 0
+#endif
+#ifndef __has_cpp_attribute
+#define __has_cpp_attribute(x) 0
+#endif
+#ifndef __has_extension
+#define __has_extension(x) 0
+#endif
+#endif /* GCC_COMPAT_H */
+EOF
+echo "[OK] gcc_compat.h erstellt"
+
+# ------------------------------------------------------------
+# 5. Wrapper mit GCC + LTO + Cortex-A35 bauen
+# ------------------------------------------------------------
+echo "==> Baue DE Wrapper mit GCC + LTO + Cortex-A35"
 rm -rf build_aarch64 output
 mkdir -p build_aarch64 output
 
@@ -158,7 +192,8 @@ cat > port/DeadEffect/README.txt << 'READMEEOF'
 Dead Effect - Native Wrapper fuer M9 Pro / R36S
 ================================================
 
-Build: Cortex-A35 + LTO + O3 optimiert
+Build: Cortex-A35 + LTO + O3 optimiert (Wrapper mit GCC)
+Linker: mcpelauncher-linker (mit Clang-12 gebaut)
 GLIBC: 2.31 (kompatibel mit ArkOS)
 
 Installation:
