@@ -14,7 +14,6 @@ echo "==> Optimierung: Cortex-A35 + LTO + O3"
 
 # ------------------------------------------------------------
 # 1. Multiarch + apt-Quellen
-#    WICHTIG: arm64 kommt von ports.ubuntu.com
 # ------------------------------------------------------------
 dpkg --add-architecture arm64
 
@@ -35,7 +34,6 @@ apt-get update
 
 # ------------------------------------------------------------
 # 2. Cross-Toolchain + ARM64-Zielbibliotheken
-#    unzip ist jetzt enthalten!
 # ------------------------------------------------------------
 echo "==> Installiere Cross-Toolchain"
 apt-get install -y --no-install-recommends \
@@ -63,19 +61,29 @@ find de_libs -name "*.so" -exec ls -la {} \;
 
 # ------------------------------------------------------------
 # 4. mcpelauncher-linker bauen (Bionic-ELF-Loader)
+#    WICHTIG: GCC-Kompatibilitaets-Flags fuer Bionic-Header
+#    Bionic-Header verwenden Clang-Makros (__has_feature,
+#    __has_builtin), die GCC 9 nicht kennt. Wir definieren sie
+#    als Fallback auf 0.
 # ------------------------------------------------------------
 echo "==> Baue mcpelauncher-linker"
 LINKER_BUILT=0
 if git clone --depth=1 --recursive https://github.com/minecraft-linux/mcpelauncher-linker.git 2>/dev/null; then
     cd mcpelauncher-linker
     mkdir -p build && cd build
+
+    LINKER_FLAGS="-Wno-error -D__has_feature(x)=0 -D__has_builtin(x)=0 -D__has_attribute(x)=0 -D__has_cpp_attribute(x)=0"
+
     cmake .. \
       -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
       -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
       -DCMAKE_SYSTEM_NAME=Linux \
       -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
       -DCMAKE_BUILD_TYPE=Release \
-      -DBUILD_SHARED_LIBS=ON
+      -DBUILD_SHARED_LIBS=ON \
+      -DCMAKE_C_FLAGS="${LINKER_FLAGS}" \
+      -DCMAKE_CXX_FLAGS="${LINKER_FLAGS}"
+
     make -j$(nproc)
     cd ../..
     echo "[OK] mcpelauncher-linker gebaut"
@@ -129,28 +137,18 @@ if [ "$LINKER_BUILT" = "1" ]; then
     find mcpelauncher-linker/build -name "*.so*" -exec cp {} port/DeadEffect/lib/ \; 2>/dev/null || true
 fi
 
-# start.sh mit Performance-Tuning (systemseitig bereits gesetzt, hier nur Mesa/Umgebung)
 cat > port/DeadEffect/start.sh << 'LAUNCHER'
 #!/bin/bash
 cd "$(dirname "$0")"
-
-# --- Mesa/Panfrost (Mali-G31) ---
+export LD_LIBRARY_PATH="./lib:$LD_LIBRARY_PATH"
+export SDL_AUDIODRIVER=alsa
 export MESA_GL_VERSION_OVERRIDE=3.1
 export MESA_GLES_VERSION_OVERRIDE=3.2
 export PAN_MESA_DEBUG=noaff,deqp
 export MESA_GLSL_CACHE_DISABLE=0
 export MESA_GLSL_CACHE_DIR="./.mesa_cache"
-
-# --- VSync aus, vblank aus ---
 export vblank_mode=0
 export SDL_RENDER_VSYNC=0
-
-# --- Audio (RK3326) ---
-export SDL_AUDIODRIVER=alsa
-
-# --- Bibliothekspfad ---
-export LD_LIBRARY_PATH="./lib:$LD_LIBRARY_PATH"
-
 chmod +x de_wrapper
 exec ./de_wrapper "$@"
 LAUNCHER
