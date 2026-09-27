@@ -3,9 +3,6 @@
 // Unity 2019.4.28f1 | IL2CPP | arm64-v8a
 // Ziel: M9 Pro / R36S (RK3326, ArkOS, GLIBC 2.31)
 // Optimiert: Cortex-A35 + LTO + O3
-//
-// Android-Libs sind bionic-gelinkt und koennen nicht direkt gelinkt
-// werden. Alle Android-Symbole werden hier selbst implementiert.
 // =============================================================================
 
 #include <dlfcn.h>
@@ -16,9 +13,6 @@
 #include <ctime>
 #include <pthread.h>
 
-// -----------------------------------------------------------------------------
-// Android-Log-Level (aus <android/log.h>)
-// -----------------------------------------------------------------------------
 #ifndef ANDROID_LOG_INFO
 #define ANDROID_LOG_INFO  4
 #endif
@@ -26,9 +20,7 @@
 #define ANDROID_LOG_ERROR 6
 #endif
 
-// -----------------------------------------------------------------------------
-// Android-Log-Funktionen selbst implementieren
-// -----------------------------------------------------------------------------
+// --- Android-Log-Funktionen selbst implementieren ---
 extern "C" int __android_log_print(int prio, const char* tag, const char* fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -54,13 +46,9 @@ extern "C" int __android_log_vprint(int prio, const char* tag, const char* fmt, 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  "DE-Wrapper", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "DE-Wrapper", __VA_ARGS__)
 
-// -----------------------------------------------------------------------------
-// JavaVM-Stub (Unity ruft JNI_OnLoad auf)
-// -----------------------------------------------------------------------------
+// --- JavaVM-Stub ---
 struct JNIInvokeInterface_stub {
-    void* reserved0;
-    void* reserved1;
-    void* reserved2;
+    void* reserved0; void* reserved1; void* reserved2;
     int (*DestroyJavaVM)(void*);
     int (*AttachCurrentThread)(void*, void**, void*);
     int (*DetachCurrentThread)(void*);
@@ -76,22 +64,13 @@ static int stub_AttachCurrentThreadAsDaemon(void*, void**, void*) { return 0; }
 
 static JNIInvokeInterface_stub g_jniInvoke = {
     nullptr, nullptr, nullptr,
-    stub_DestroyJavaVM,
-    stub_AttachCurrentThread,
-    stub_DetachCurrentThread,
-    stub_GetEnv,
-    stub_AttachCurrentThreadAsDaemon
+    stub_DestroyJavaVM, stub_AttachCurrentThread, stub_DetachCurrentThread,
+    stub_GetEnv, stub_AttachCurrentThreadAsDaemon
 };
 
-struct JavaVM_stub {
-    JNIInvokeInterface_stub* functions;
-};
-
+struct JavaVM_stub { JNIInvokeInterface_stub* functions; };
 static JavaVM_stub g_javaVM = { &g_jniInvoke };
 
-// -----------------------------------------------------------------------------
-// Bibliothek laden
-// -----------------------------------------------------------------------------
 static void* load_library(const char* name) {
     void* handle = dlopen(name, RTLD_NOW | RTLD_GLOBAL);
     if (!handle) {
@@ -102,16 +81,12 @@ static void* load_library(const char* name) {
     return handle;
 }
 
-// -----------------------------------------------------------------------------
-// Hauptfunktion
-// -----------------------------------------------------------------------------
 int main(int argc, char** argv) {
     LOGI("=== Dead Effect Wrapper gestartet ===");
     LOGI("Unity 2019.4.28f1 | IL2CPP | arm64-v8a");
     LOGI("Ziel: M9 Pro / R36S (RK3326)");
     LOGI("Optimiert: Cortex-A35 + LTO + O3");
 
-    // --- 1. libmain.so laden (Unity-Einstiegspunkt) ---
     void* libmain = load_library("libmain.so");
     if (!libmain) {
         LOGE("libmain.so konnte nicht geladen werden!");
@@ -119,7 +94,6 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // --- 2. JNI_OnLoad aufrufen ---
     typedef int (*JNI_OnLoad_t)(void* vm, void* reserved);
     JNI_OnLoad_t jni_onload = (JNI_OnLoad_t)dlsym(libmain, "JNI_OnLoad");
     if (jni_onload) {
@@ -137,9 +111,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    // --- 3. Unity main-Funktion finden ---
     typedef int (*unity_main_t)(int argc, char** argv);
-
     unity_main_t unity_main = (unity_main_t)dlsym(libmain, "main");
     if (!unity_main) {
         LOGI("main nicht in libmain.so, versuche android_main...");
