@@ -4,7 +4,6 @@ project(de_wrapper CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# --- Cross-Compile fuer aarch64 ---
 if(CMAKE_CROSSCOMPILING OR CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
     set(CMAKE_C_COMPILER aarch64-linux-gnu-gcc)
     set(CMAKE_CXX_COMPILER aarch64-linux-gnu-g++)
@@ -28,7 +27,7 @@ endif()
 
 # =============================================================
 # MAXIMALE OPTIMIERUNG (Cortex-A35 / RK3326)
-# KEINE funktionsartigen Makros hier! (CMake unterstuetzt das nicht)
+# KEINE funktionsartigen Makros (CMake unterstuetzt das nicht)
 # =============================================================
 set(CORTEX_FLAGS
     "-mcpu=cortex-a35"
