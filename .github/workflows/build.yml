@@ -16,59 +16,135 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # ============================================================
+      # 1. Repository auschecken
+      # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
+      # ============================================================
+      # 2. Cross-Toolchain + Multiarch installieren (nach Vorbild
+      #    deiner build.sh: dpkg --add-architecture arm64)
+      # ============================================================
       - name: Install cross-compiler and dependencies
         run: |
+          sudo dpkg --add-architecture arm64
+          
+          # Quellen fuer arm64 hinzufuegen
+          sudo bash -c 'cat > /etc/apt/sources.list.d/arm64.list <<EOF
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse
+          EOF'
+          
+          # Amd64-Quellen auf arch=amd64 beschraenken
+          sudo sed -i 's/^deb http/deb [arch=amd64] http/' /etc/apt/sources.list 2>/dev/null || true
+          sudo sed -i 's/^deb https/deb [arch=amd64] https/' /etc/apt/sources.list 2>/dev/null || true
+          
           sudo apt-get update
           sudo apt-get install -y \
             gcc-aarch64-linux-gnu \
             g++-aarch64-linux-gnu \
-            cmake \
             binutils-aarch64-linux-gnu \
+            cmake \
             unzip \
-            file
+            file \
+            wget
 
+      # ============================================================
+      # 3. Dead Effect native libs herunterladen
+      # ============================================================
       - name: Download Dead Effect native libs
         run: |
+          echo "=== Lade ZIP von: $DE_LIBS_URL ==="
           curl -L -o arm64-v8a.zip "$DE_LIBS_URL"
-          unzip -o arm64-v8a.zip -d de_libs/
-          ls -la de_libs/
 
+          echo ""
+          echo "=== Datei-Info ==="
+          ls -la arm64-v8a.zip
+          file arm64-v8a.zip
+
+          # ZIP-Gueltigkeit pruefen
+          if ! unzip -t arm64-v8a.zip > /dev/null 2>&1; then
+            echo "[FEHLER] Keine gueltige ZIP-Datei!"
+            exit 1
+          fi
+
+          unzip -o arm64-v8a.zip -d de_libs/
+          echo ""
+          echo "=== Entpackte Bibliotheken ==="
+          find de_libs -name "*.so" -exec ls -la {} \;
+
+      # ============================================================
+      # 4. Wrapper bauen
+      # ============================================================
       - name: Build wrapper
         run: |
           chmod +x build.sh
           ./build.sh
 
+          echo ""
+          echo "=== Build-Ergebnis ==="
+          file output/de_wrapper
+          ls -la output/
+
+      # ============================================================
+      # 5. Port-Paket schnueren
+      # ============================================================
       - name: Package port for R36S
         run: |
           mkdir -p port/DeadEffect/lib
+
+          # Wrapper
           cp output/de_wrapper port/DeadEffect/
-          cp de_libs/*.so port/DeadEffect/lib/ 2>/dev/null || true
-          cp de_libs/libmain.so port/DeadEffect/lib/ 2>/dev/null || true
+
+          # Native Bibliotheken aus dem Release
+          cp de_libs/arm64-v8a/*.so port/DeadEffect/lib/ 2>/dev/null || \
+            cp de_libs/*.so port/DeadEffect/lib/ 2>/dev/null || true
 
           # Launcher-Skript erstellen
           cat > port/DeadEffect/start.sh << 'LAUNCHER'
           #!/bin/bash
+          # Dead Effect - Startskript fuer R36S
           cd "$(dirname "$0")"
+
+          # Bibliothekspfad setzen
           export LD_LIBRARY_PATH="./lib:$LD_LIBRARY_PATH"
+
+          # ALSA-Audio (RK3326)
+          export SDL_AUDIODRIVER=alsa
+
+          # Mesa/Panfrost-Einstellungen fuer RK3326
+          export MESA_GL_VERSION_OVERRIDE=2.0
+          export MESA_GLES_VERSION_OVERRIDE=2.0
+          export LIBGL_ES=2
+          export vblank_mode=0
+
           chmod +x de_wrapper
-          ./de_wrapper "$@"
+          exec ./de_wrapper "$@"
           LAUNCHER
           chmod +x port/DeadEffect/start.sh
 
+          # ZIP erstellen
           cd port && zip -r ../DeadEffect-Wrapper.zip .
-          ls -la ../DeadEffect-Wrapper.zip
+          cd ..
+          echo ""
+          echo "=== ZIP-Inhalt ==="
+          unzip -l DeadEffect-Wrapper.zip
 
+      # ============================================================
+      # 6. Artefakt hochladen
+      # ============================================================
       - name: Upload port as artifact
         uses: actions/upload-artifact@v4
         with:
           name: DeadEffect-Wrapper
           path: DeadEffect-Wrapper.zip
+          retention-days: 30
 
+      # ============================================================
+      # 7. Optional: Bei Tag auch ins Release
+      # ============================================================
       - name: Upload to Release (bei Tag)
         uses: softprops/action-gh-release@v1
         if: startsWith(github.ref, 'refs/tags/')
