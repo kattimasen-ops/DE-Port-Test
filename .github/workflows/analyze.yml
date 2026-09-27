@@ -1,10 +1,14 @@
-name: Analyze Dead Effect APK
+name: Analyze Dead Effect (IL2CPP)
 
 on:
   workflow_dispatch:
   push:
     paths:
-      - 'dead-effect.xapk'
+      - 'analyze_apk.sh'
+      - '.github/workflows/analyze.yml'
+
+env:
+  RELEASE_URL: https://github.com/kattimasen-ops/DE-Port-Test/releases/download/V1/arm64-v8a.zip
 
 jobs:
   analyze:
@@ -18,7 +22,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y binutils unzip file
 
+      - name: Download arm64-v8a.zip from Release
+        run: |
+          echo "Lade ZIP von: $RELEASE_URL"
+          curl -L -o arm64-v8a.zip "$RELEASE_URL"
+          ls -la arm64-v8a.zip
+          file arm64-v8a.zip
+
       - name: Run analysis script
         run: |
           chmod +x analyze_apk.sh
           ./analyze_apk.sh
+
+      - name: Upload analysis results
+        uses: actions/upload-artifact@v4
+        with:
+          name: analysis-results
+          path: analysis_output/
+          if-no-files-found: warn
