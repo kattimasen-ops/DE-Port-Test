@@ -2,49 +2,68 @@
 // Dead Effect - Native Android-zu-Linux Wrapper
 // Unity 2019.4.28f1 | IL2CPP | arm64-v8a
 //
-// Dieser Wrapper laedt libmain.so (den Unity-Einstiegspunkt),
-// der wiederum libunity.so und libil2cpp.so laedt.
+// WICHTIG: Android-Libs sind bionic-gelinkt und koennen nicht direkt
+// gelinkt werden. Alle Android-Symbole werden hier selbst implementiert
+// oder zur Laufzeit per dlopen() geladen.
 // =============================================================================
 
 #include <dlfcn.h>
-#include <jni.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cstdarg>
 #include <ctime>
-#include <android/log.h>
+#include <pthread.h>
 
-// --- Logging-Makro ---
-#define LOG_TAG "DE-Wrapper"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+// --- Android-Log-Level ---
+#define ANDROID_LOG_INFO  4
+#define ANDROID_LOG_ERROR 6
 
-// --- Unity JNI_OnLoad Signatur ---
-typedef jint (*JNI_OnLoad_t)(JavaVM* vm, void* reserved);
-typedef void (*JNI_OnUnload_t)(JavaVM* vm, void* reserved);
-
-// --- Einstiegspunkt: Die main-Funktion in libmain.so ---
-// Unity exportiert diese als "main" oder "android_main"
-typedef int (*unity_main_t)(int argc, char** argv);
-
-static JavaVM* g_javaVM = nullptr;
-
-// =============================================================================
-// Minimaler JNI-Stub (damit Unity denkt, es spricht mit Java)
-// =============================================================================
-static jint JNICALL stub_DestroyJavaVM(JavaVM* vm) { return JNI_OK; }
-static jint JNICALL stub_AttachCurrentThread(JavaVM* vm, void** env, void* args) { return JNI_OK; }
-static jint JNICALL stub_DetachCurrentThread(JavaVM* vm) { return JNI_OK; }
-static jint JNICALL stub_GetEnv(JavaVM* vm, void** env, jint version) { 
-    *env = nullptr; 
-    return JNI_EDETACHED; 
+extern "C" int __android_log_print(int prio, const char* tag, const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    fprintf(stderr, "[%s] ", tag ? tag : "?");
+    int r = vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n");
+    va_end(ap);
+    return r;
 }
-static jint JNICALL stub_AttachCurrentThreadAsDaemon(JavaVM* vm, void** env, void* args) { return JNI_OK; }
 
-static JNIInvokeInterface g_jniInvokeInterface = {
-    nullptr,  // reserved0
-    nullptr,  // reserved1
-    nullptr,  // reserved2
+extern "C" int __android_log_write(int prio, const char* tag, const char* text) {
+    fprintf(stderr, "[%s] %s\n", tag ? tag : "?", text ? text : "");
+    return 0;
+}
+
+extern "C" int __android_log_vprint(int prio, const char* tag, const char* fmt, va_list ap) {
+    fprintf(stderr, "[%s] ", tag ? tag : "?");
+    int r = vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n");
+    return r;
+}
+
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "DE-Wrapper", __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "DE-Wrapper", __VA_ARGS__)
+
+// --- JavaVM-Stub ---
+struct JNIInvokeInterface_stub {
+    void* reserved0;
+    void* reserved1;
+    void* reserved2;
+    int (*DestroyJavaVM)(void*);
+    int (*AttachCurrentThread)(void*, void**, void*);
+    int (*DetachCurrentThread)(void*);
+    int (*GetEnv)(void*, void**, int);
+    int (*AttachCurrentThreadAsDaemon)(void*, void**, void*);
+};
+
+static int stub_DestroyJavaVM(void*) { return 0; }
+static int stub_AttachCurrentThread(void*, void** env, void*) { if (env) *env = nullptr; return 0; }
+static int stub_DetachCurrentThread(void*) { return 0; }
+static int stub_GetEnv(void*, void** env, int) { if (env) *env = nullptr; return -2; }
+static int stub_AttachCurrentThreadAsDaemon(void*, void**, void*) { return 0; }
+
+static JNIInvokeInterface_stub g_jniInvoke = {
+    nullptr, nullptr, nullptr,
     stub_DestroyJavaVM,
     stub_AttachCurrentThread,
     stub_DetachCurrentThread,
@@ -52,67 +71,60 @@ static JNIInvokeInterface g_jniInvokeInterface = {
     stub_AttachCurrentThreadAsDaemon
 };
 
-static JavaVM g_javaVMInstance = {
-    &g_jniInvokeInterface
+struct JavaVM_stub {
+    JNIInvokeInterface_stub* functions;
 };
 
-// =============================================================================
-// Hilfsfunktion: Bibliothek laden mit Fehlerbehandlung
-// =============================================================================
+static JavaVM_stub g_javaVM = { &g_jniInvoke };
+
+typedef int (*JNI_OnLoad_t)(void* vm, void* reserved);
+typedef int (*unity_main_t)(int argc, char** argv);
+
 static void* load_library(const char* name) {
     void* handle = dlopen(name, RTLD_NOW | RTLD_GLOBAL);
     if (!handle) {
         LOGE("FEHLER beim Laden von %s: %s", name, dlerror());
-        return nullptr;
+    } else {
+        LOGI("Geladen: %s", name);
     }
-    LOGI("Geladen: %s", name);
     return handle;
 }
 
-// =============================================================================
-// Hauptfunktion
-// =============================================================================
 int main(int argc, char** argv) {
     LOGI("=== Dead Effect Wrapper gestartet ===");
     LOGI("Unity 2019.4.28f1 | IL2CPP | arm64-v8a");
 
-    // --- 1. libmain.so laden (Unity-Einstiegspunkt) ---
-    // libmain.so oeffnet libunity.so und libil2cpp.so
+    // libmain.so laden
     void* libmain = load_library("libmain.so");
     if (!libmain) {
         LOGE("libmain.so konnte nicht geladen werden!");
         return 1;
     }
 
-    // --- 2. JNI_OnLoad aufrufen (falls exportiert) ---
+    // JNI_OnLoad aufrufen
     JNI_OnLoad_t jni_onload = (JNI_OnLoad_t)dlsym(libmain, "JNI_OnLoad");
     if (jni_onload) {
-        LOGI("JNI_OnLoad gefunden, rufe auf...");
-        jint result = jni_onload(&g_javaVMInstance, nullptr);
-        LOGI("JNI_OnLoad Ergebnis: %d", result);
+        LOGI("JNI_OnLoad in libmain.so gefunden");
+        jni_onload(&g_javaVM, nullptr);
     } else {
-        LOGI("JNI_OnLoad nicht in libmain.so gefunden, versuche libunity.so...");
-        
-        // Fallback: JNI_OnLoad direkt aus libunity.so
+        LOGI("JNI_OnLoad nicht in libmain.so, versuche libunity.so...");
         void* libunity = load_library("libunity.so");
         if (libunity) {
             jni_onload = (JNI_OnLoad_t)dlsym(libunity, "JNI_OnLoad");
             if (jni_onload) {
-                LOGI("JNI_OnLoad in libunity.so gefunden, rufe auf...");
-                jni_onload(&g_javaVMInstance, nullptr);
+                LOGI("JNI_OnLoad in libunity.so gefunden");
+                jni_onload(&g_javaVM, nullptr);
             }
         }
     }
 
-    // --- 3. Unity main-Funktion finden und aufrufen ---
-    // Unity exportiert den Einstiegspunkt als "main" oder "android_main"
+    // Unity main-Funktion finden
     unity_main_t unity_main = (unity_main_t)dlsym(libmain, "main");
     if (!unity_main) {
         LOGI("main nicht in libmain.so, versuche android_main...");
         unity_main = (unity_main_t)dlsym(libmain, "android_main");
     }
     if (!unity_main) {
-        // Letzter Versuch: direkt in libunity.so
         void* libunity = dlopen("libunity.so", RTLD_NOW | RTLD_GLOBAL);
         if (libunity) {
             unity_main = (unity_main_t)dlsym(libunity, "main");
@@ -124,10 +136,6 @@ int main(int argc, char** argv) {
 
     if (!unity_main) {
         LOGE("Kein Unity-Einstiegspunkt gefunden!");
-        LOGE("Verfuegbare Symbole in libmain.so:");
-        // Debug: Alle Symbole auflisten
-        void* sym = dlsym(libmain, "JNI_OnLoad");
-        if (sym) LOGE("  JNI_OnLoad gefunden");
         return 1;
     }
 
