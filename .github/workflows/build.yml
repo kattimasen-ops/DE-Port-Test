@@ -1,4 +1,4 @@
-name: Build DE Wrapper (Docker / GLIBC 2.31)
+name: Build DE Wrapper (Docker / GLIBC 2.31 / Cortex-A35 + LTO)
 
 on:
   workflow_dispatch:
