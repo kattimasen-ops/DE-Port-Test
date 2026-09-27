@@ -2,6 +2,7 @@
 # ============================================================
 # Dead Effect Wrapper - Cross-Compile fuer RK3326 / ARM64
 # Laeuft im ubuntu:20.04 Container (GLIBC 2.31)
+# Optimiert fuer Cortex-A35 mit LTO
 # ============================================================
 set -e
 
@@ -9,38 +10,36 @@ export DEBIAN_FRONTEND=noninteractive
 
 echo "==> Host arch: $(uname -m)"
 echo "==> Ziel: M9 Pro / R36S (RK3326, aarch64, GLIBC 2.31)"
+echo "==> Optimierung: Cortex-A35 + LTO + O3"
 
 # ------------------------------------------------------------
 # 1. Multiarch + apt-Quellen
-#    WICHTIG: arm64 kommt von ports.ubuntu.com, NICHT von
-#    archive.ubuntu.com oder security.ubuntu.com
+#    WICHTIG: arm64 kommt von ports.ubuntu.com
 # ------------------------------------------------------------
 dpkg --add-architecture arm64
 
-# amd64-Quellen
 cat > /etc/apt/sources.list.d/amd64.list <<'EOF'
 deb [arch=amd64] http://archive.ubuntu.com/ubuntu focal main restricted universe multiverse
 deb [arch=amd64] http://archive.ubuntu.com/ubuntu focal-updates main restricted universe multiverse
 deb [arch=amd64] http://security.ubuntu.com/ubuntu focal-security main restricted universe multiverse
 EOF
 
-# arm64-Quellen (ports.ubuntu.com!)
 cat > /etc/apt/sources.list.d/arm64.list <<'EOF'
 deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal main restricted universe multiverse
 deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-updates main restricted universe multiverse
 deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-security main restricted universe multiverse
 EOF
 
-# Standard-Quellen deaktivieren
 rm -f /etc/apt/sources.list
 apt-get update
 
 # ------------------------------------------------------------
 # 2. Cross-Toolchain + ARM64-Zielbibliotheken
+#    unzip ist jetzt enthalten!
 # ------------------------------------------------------------
 echo "==> Installiere Cross-Toolchain"
 apt-get install -y --no-install-recommends \
-  build-essential cmake git pkg-config ca-certificates wget file zip python3 \
+  build-essential cmake git pkg-config ca-certificates wget file zip unzip python3 \
   crossbuild-essential-arm64 \
   libasound2-dev:arm64 \
   libpulse-dev:arm64 \
@@ -64,10 +63,9 @@ find de_libs -name "*.so" -exec ls -la {} \;
 
 # ------------------------------------------------------------
 # 4. mcpelauncher-linker bauen (Bionic-ELF-Loader)
-#    Wird fuer das Laden der Android-.so-Dateien benoetigt,
-#    weil diese gegen Bionic (Android-libc) gelinkt sind.
 # ------------------------------------------------------------
 echo "==> Baue mcpelauncher-linker"
+LINKER_BUILT=0
 if git clone --depth=1 --recursive https://github.com/minecraft-linux/mcpelauncher-linker.git 2>/dev/null; then
     cd mcpelauncher-linker
     mkdir -p build && cd build
@@ -84,13 +82,12 @@ if git clone --depth=1 --recursive https://github.com/minecraft-linux/mcpelaunch
     LINKER_BUILT=1
 else
     echo "[WARN] mcpelauncher-linker konnte nicht geklont werden"
-    LINKER_BUILT=0
 fi
 
 # ------------------------------------------------------------
-# 5. Wrapper bauen
+# 5. Wrapper bauen mit LTO + Cortex-A35
 # ------------------------------------------------------------
-echo "==> Baue DE Wrapper"
+echo "==> Baue DE Wrapper mit LTO und Cortex-A35-Optimierung"
 rm -rf build_aarch64 output
 mkdir -p build_aarch64 output
 
@@ -99,13 +96,18 @@ cmake -B build_aarch64 \
   -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
   -DCMAKE_SYSTEM_NAME=Linux \
   -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-  -DCMAKE_BUILD_TYPE=Release
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_COMPILER_AR=aarch64-linux-gnu-gcc-ar \
+  -DCMAKE_C_COMPILER_RANLIB=aarch64-linux-gnu-gcc-ranlib \
+  -DCMAKE_CXX_COMPILER_AR=aarch64-linux-gnu-gcc-ar \
+  -DCMAKE_CXX_COMPILER_RANLIB=aarch64-linux-gnu-gcc-ranlib
 
 cmake --build build_aarch64 -j$(nproc)
 
 cp build_aarch64/de_wrapper output/
 echo "=== Wrapper-Info ==="
 file output/de_wrapper
+readelf -p .comment output/de_wrapper 2>/dev/null | head -5
 ls -la output/
 
 # ------------------------------------------------------------
@@ -115,66 +117,59 @@ echo "==> Erstelle Port-Paket"
 rm -rf port
 mkdir -p port/DeadEffect/lib
 
-# Wrapper
 cp output/de_wrapper port/DeadEffect/
 
-# Native Android-Bibliotheken
 if [ -d de_libs/arm64-v8a ]; then
     cp de_libs/arm64-v8a/*.so port/DeadEffect/lib/ 2>/dev/null || true
 else
     cp de_libs/*.so port/DeadEffect/lib/ 2>/dev/null || true
 fi
 
-# mcpelauncher-linker Bibliotheken (falls gebaut)
 if [ "$LINKER_BUILT" = "1" ]; then
     find mcpelauncher-linker/build -name "*.so*" -exec cp {} port/DeadEffect/lib/ \; 2>/dev/null || true
 fi
 
-# Launcher-Skript
+# start.sh mit Performance-Tuning (systemseitig bereits gesetzt, hier nur Mesa/Umgebung)
 cat > port/DeadEffect/start.sh << 'LAUNCHER'
 #!/bin/bash
-# Dead Effect - Startskript fuer M9 Pro / R36S
 cd "$(dirname "$0")"
 
-# Bibliothekspfad
-export LD_LIBRARY_PATH="./lib:$LD_LIBRARY_PATH"
+# --- Mesa/Panfrost (Mali-G31) ---
+export MESA_GL_VERSION_OVERRIDE=3.1
+export MESA_GLES_VERSION_OVERRIDE=3.2
+export PAN_MESA_DEBUG=noaff,deqp
+export MESA_GLSL_CACHE_DISABLE=0
+export MESA_GLSL_CACHE_DIR="./.mesa_cache"
 
-# Audio (RK3326)
+# --- VSync aus, vblank aus ---
+export vblank_mode=0
+export SDL_RENDER_VSYNC=0
+
+# --- Audio (RK3326) ---
 export SDL_AUDIODRIVER=alsa
 
-# Mesa / Panfrost (Mali-G31)
-export MESA_GL_VERSION_OVERRIDE=2.0
-export MESA_GLES_VERSION_OVERRIDE=2.0
-export LIBGL_ES=2
-export vblank_mode=0
-
-# Debug-Ausgaben
-export MCPE_LOG_LEVEL=info
+# --- Bibliothekspfad ---
+export LD_LIBRARY_PATH="./lib:$LD_LIBRARY_PATH"
 
 chmod +x de_wrapper
 exec ./de_wrapper "$@"
 LAUNCHER
 chmod +x port/DeadEffect/start.sh
 
-# README
 cat > port/DeadEffect/README.txt << 'READMEEOF'
 Dead Effect - Native Wrapper fuer M9 Pro / R36S
 ================================================
+
+Build: Cortex-A35 + LTO + O3 optimiert
+GLIBC: 2.31 (kompatibel mit ArkOS)
 
 Installation:
 1. Kopiere den Ordner "DeadEffect" nach /roms/ports/
 2. Kopiere deine Dead Effect OBB-Daten nach:
    /roms/ports/DeadEffect/assets/
 3. Starte ueber EmulationStation > Ports > Dead Effect
-
-Starten via Konsole:
-   cd /roms/ports/DeadEffect
-   ./start.sh
-
-Log-Ausgabe wird auf stdout ausgegeben.
 READMEEOF
 
-# ZIP erstellen
 cd port && zip -r ../DeadEffect-Wrapper.zip . > /dev/null
 cd ..
 
