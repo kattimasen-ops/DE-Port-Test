@@ -4,9 +4,10 @@
 # Laeuft im ubuntu:20.04 Container (GLIBC 2.31)
 #
 # WICHTIG:
-#   - mcpelauncher-linker: MUSS mit Clang gebaut werden (AOSP ist
-#     Clang-only). GCC scheitert an C11 _Atomic in Bionic-Headern.
-#   - Wrapper: GCC ist OK (keine Bionic-Header).
+#   - mcpelauncher-linker MUSS mit Clang gebaut werden (AOSP
+#     ist Clang-only, GCC scheitert an C11 _Atomic).
+#   - Clang braucht den GCC-C++-Include-Pfad fuer bits/c++config.h.
+#   - Der Wrapper wird mit GCC + LTO + Cortex-A35 gebaut.
 # ============================================================
 set -e
 
@@ -67,16 +68,35 @@ echo "=== Enthaltene Bibliotheken ==="
 find de_libs -name "*.so" -exec ls -la {} \;
 
 # ------------------------------------------------------------
-# 4. mcpelauncher-linker mit CLANG bauen (Bionic-ELF-Loader)
-#    AOSP-Code ist Clang-only. GCC scheitert an C11 _Atomic.
+# 4. mcpelauncher-linker mit CLANG bauen
+#    FIX: Clang braucht den GCC-C++-Include-Pfad fuer
+#    bits/c++config.h. Dieser liegt unter
+#    /usr/aarch64-linux-gnu/include/c++/9/aarch64-linux-gnu
 # ------------------------------------------------------------
 echo "==> Baue mcpelauncher-linker mit Clang"
+
+# Include-Pfad ermitteln (verschiedene GCC-Versionen moeglich)
+GCC_CXX_INCLUDE=""
+for ver in 9 10 11 12; do
+    if [ -d "/usr/aarch64-linux-gnu/include/c++/$ver/aarch64-linux-gnu" ]; then
+        GCC_CXX_INCLUDE="/usr/aarch64-linux-gnu/include/c++/$ver/aarch64-linux-gnu"
+        break
+    fi
+done
+
+if [ -z "$GCC_CXX_INCLUDE" ]; then
+    echo "[FEHLER] GCC-C++-Include-Pfad nicht gefunden!"
+    echo "Verfuegbare Pfade:"
+    ls -la /usr/aarch64-linux-gnu/include/c++/ 2>/dev/null || true
+    exit 1
+fi
+echo "[OK] GCC-C++-Include: $GCC_CXX_INCLUDE"
+
 LINKER_BUILT=0
 if git clone --depth=1 --recursive https://github.com/minecraft-linux/mcpelauncher-linker.git 2>/dev/null; then
     cd mcpelauncher-linker
     mkdir -p build && cd build
 
-    # Clang Cross-Compile: Target-Triple angeben
     cmake .. \
       -DCMAKE_C_COMPILER=clang-12 \
       -DCMAKE_C_COMPILER_TARGET=aarch64-linux-gnu \
@@ -86,6 +106,8 @@ if git clone --depth=1 --recursive https://github.com/minecraft-linux/mcpelaunch
       -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
       -DCMAKE_BUILD_TYPE=Release \
       -DBUILD_SHARED_LIBS=ON \
+      -DCMAKE_C_FLAGS="-isystem $GCC_CXX_INCLUDE" \
+      -DCMAKE_CXX_FLAGS="-isystem $GCC_CXX_INCLUDE" \
       -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld-12" \
       -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld-12"
 
@@ -96,35 +118,6 @@ if git clone --depth=1 --recursive https://github.com/minecraft-linux/mcpelaunch
 else
     echo "[WARN] mcpelauncher-linker konnte nicht geklont werden"
 fi
-
-# ------------------------------------------------------------
-# 4b. GCC-Kompatibilitaets-Header erstellen
-#     (Sicherheitsnetz fuer den Wrapper - wird per -include
-#     eingebunden, nicht per -D, weil CMake keine funktions-
-#     artigen Makros ueber die Kommandozeile uebergeben kann)
-# ------------------------------------------------------------
-cat > /work/gcc_compat.h <<'EOF'
-/* GCC-Kompatibilitaet fuer Clang-Makros */
-#ifndef GCC_COMPAT_H
-#define GCC_COMPAT_H
-#ifndef __has_feature
-#define __has_feature(x) 0
-#endif
-#ifndef __has_builtin
-#define __has_builtin(x) 0
-#endif
-#ifndef __has_attribute
-#define __has_attribute(x) 0
-#endif
-#ifndef __has_cpp_attribute
-#define __has_cpp_attribute(x) 0
-#endif
-#ifndef __has_extension
-#define __has_extension(x) 0
-#endif
-#endif /* GCC_COMPAT_H */
-EOF
-echo "[OK] gcc_compat.h erstellt"
 
 # ------------------------------------------------------------
 # 5. Wrapper mit GCC + LTO + Cortex-A35 bauen
@@ -153,7 +146,7 @@ readelf -p .comment output/de_wrapper 2>/dev/null | head -5
 ls -la output/
 
 # ------------------------------------------------------------
-# 6. Port-Paket schnueren
+# 6. Port-Paket schnueren (mit start.sh + gptk)
 # ------------------------------------------------------------
 echo "==> Erstelle Port-Paket"
 rm -rf port
@@ -171,22 +164,27 @@ if [ "$LINKER_BUILT" = "1" ]; then
     find mcpelauncher-linker/build -name "*.so*" -exec cp {} port/DeadEffect/lib/ \; 2>/dev/null || true
 fi
 
-cat > port/DeadEffect/start.sh << 'LAUNCHER'
+# start.sh aus dem Repo kopieren (PortMaster-integriert)
+if [ -f /work/start.sh ]; then
+    cp /work/start.sh port/DeadEffect/DeadEffect.sh
+    chmod +x port/DeadEffect/DeadEffect.sh
+else
+    echo "[WARN] start.sh nicht gefunden – erstelle Fallback"
+    cat > port/DeadEffect/DeadEffect.sh << 'LAUNCHER'
 #!/bin/bash
 cd "$(dirname "$0")"
 export LD_LIBRARY_PATH="./lib:$LD_LIBRARY_PATH"
 export SDL_AUDIODRIVER=alsa
-export MESA_GL_VERSION_OVERRIDE=3.1
-export MESA_GLES_VERSION_OVERRIDE=3.2
-export PAN_MESA_DEBUG=noaff,deqp
-export MESA_GLSL_CACHE_DISABLE=0
-export MESA_GLSL_CACHE_DIR="./.mesa_cache"
-export vblank_mode=0
-export SDL_RENDER_VSYNC=0
 chmod +x de_wrapper
 exec ./de_wrapper "$@"
 LAUNCHER
-chmod +x port/DeadEffect/start.sh
+    chmod +x port/DeadEffect/DeadEffect.sh
+fi
+
+# gptk-Datei kopieren
+if [ -f /work/de_wrapper.gptk ]; then
+    cp /work/de_wrapper.gptk port/DeadEffect/
+fi
 
 cat > port/DeadEffect/README.txt << 'READMEEOF'
 Dead Effect - Native Wrapper fuer M9 Pro / R36S
@@ -203,12 +201,12 @@ Installation:
 3. Starte ueber EmulationStation > Ports > Dead Effect
 READMEEOF
 
-cd port && zip -r ../DeadEffect-Wrapper.zip . > /dev/null
+cd port && zip -r ../DeadEffect-Port.zip . > /dev/null
 cd ..
 
 echo ""
 echo "=== ZIP-Inhalt ==="
-unzip -l DeadEffect-Wrapper.zip
+unzip -l DeadEffect-Port.zip
 
 echo ""
 echo "==> Cross-Compile erfolgreich."
