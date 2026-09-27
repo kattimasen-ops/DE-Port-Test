@@ -11,7 +11,7 @@ if(CMAKE_CROSSCOMPILING OR CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
 endif()
 
 # =============================================================
-# LTO / IPO (Interprocedural Optimization)
+# LTO / IPO
 # =============================================================
 include(CheckIPOSupported)
 check_ipo_supported(RESULT LTO_SUPPORTED OUTPUT LTO_ERROR)
@@ -28,61 +28,43 @@ endif()
 
 # =============================================================
 # MAXIMALE OPTIMIERUNG (Cortex-A35 / RK3326)
+# KEINE funktionsartigen Makros hier! (CMake unterstuetzt das nicht)
 # =============================================================
 set(CORTEX_FLAGS
-    # --- Ziel-CPU ---
     "-mcpu=cortex-a35"
     "-mtune=cortex-a35"
-
-    # --- Optimierungsstufe ---
     "-O3"
-
-    # --- Code-Groesse / Cache-Effizienz ---
     "-fomit-frame-pointer"
     "-fno-stack-protector"
     "-fno-asynchronous-unwind-tables"
     "-fmerge-all-constants"
     "-ffunction-sections"
     "-fdata-sections"
-
-    # --- Symbol-/Call-Overhead reduzieren ---
     "-fno-semantic-interposition"
     "-fno-plt"
     "-fvisibility=hidden"
     "-fvisibility-inlines-hidden"
-
-    # --- C++-Overhead eliminieren ---
     "-fno-exceptions"
     "-fno-rtti"
     "-fno-threadsafe-statics"
-
-    # --- FP / Math ---
     "-fno-math-errno"
     "-fno-trapping-math"
     "-ffast-math"
     "-ftree-vectorize"
     "-fvect-cost-model=unlimited"
-
-    # --- Loop-Optimierungen ---
     "-funroll-loops"
     "-fpeel-loops"
     "-fpredictive-commoning"
     "-fsplit-paths"
     "-ftree-loop-distribute-patterns"
     "-fprefetch-loop-arrays"
-
-    # --- Interprocedural (verstaerkt LTO) ---
     "-fipa-cp-clone"
     "-fdevirtualize-at-ltrans"
     "-fipa-pta"
-
-    # --- Alignment ---
     "-falign-functions=16"
     "-falign-loops=16"
     "-falign-jumps=16"
     "-falign-labels=16"
-
-    # --- Sonstiges ---
     "-fno-ident"
     "-DNDEBUG"
 )
