@@ -9,10 +9,11 @@ if(CMAKE_CROSSCOMPILING OR CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
     set(CMAKE_CXX_COMPILER aarch64-linux-gnu-g++)
 endif()
 
-# --- Executable ---
 add_executable(de_wrapper src/wrapper.cpp)
 
-# --- Nur Standard-Linux-Bibliotheken linken ---
+# NUR Standard-Linux-Bibliotheken linken.
+# Die Android-Libs werden zur Laufzeit per dlopen() geladen,
+# weil sie bionic-gelinkt sind und nicht direkt gelinkt werden koennen.
 target_link_libraries(de_wrapper
     dl
     pthread
