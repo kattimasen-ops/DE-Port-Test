@@ -41,9 +41,12 @@ int32_t ANativeWindow_setBuffersGeometry(ANativeWindow *w, int32_t width, int32_
     return 0;
 }
 
-static ALooper g_looper;
-ALooper *ALooper_prepare(int opts) { (void)opts; return &g_looper; }
-ALooper *ALooper_forThread(void)   { return &g_looper; }
+/* ALooper is an opaque type in the NDK; we only ever return a fake pointer. */
+static int g_looper_dummy;
+static ALooper *g_looper = (ALooper *)&g_looper_dummy;
+
+ALooper *ALooper_prepare(int opts) { (void)opts; return g_looper; }
+ALooper *ALooper_forThread(void)   { return g_looper; }
 void ALooper_acquire(ALooper *l)   { (void)l; }
 void ALooper_release(ALooper *l)   { (void)l; }
 int ALooper_pollAll(int timeoutMillis, int *outFd, int *outEvents, void **outData) {
@@ -58,9 +61,12 @@ void ALooper_wake(ALooper *l) { (void)l; }
 int ALooper_addFd(ALooper *l, int fd, int ident, int events, ALooper_callbackFunc cb, void *data) { return 1; }
 int ALooper_removeFd(ALooper *l, int fd) { return 1; }
 
-static ASensorManager g_sensor_mgr;
-ASensorManager *ASensorManager_getInstance(void) { return &g_sensor_mgr; }
-ASensorManager *ASensorManager_getInstanceForPackage(const char *p) { (void)p; return &g_sensor_mgr; }
+/* ASensorManager is also opaque. */
+static int g_sensor_mgr_dummy;
+static ASensorManager *g_sensor_mgr = (ASensorManager *)&g_sensor_mgr_dummy;
+
+ASensorManager *ASensorManager_getInstance(void) { return g_sensor_mgr; }
+ASensorManager *ASensorManager_getInstanceForPackage(const char *p) { (void)p; return g_sensor_mgr; }
 int ASensorManager_getSensorList(ASensorManager *m, ASensor const **list) { if (list) *list = NULL; return 0; }
 ASensor const *ASensorManager_getDefaultSensor(ASensorManager *m, int t) { (void)m; (void)t; return NULL; }
 ASensorEventQueue *ASensorManager_createEventQueue(ASensorManager *m, ALooper *l, int i, int (*cb)(int,int,void*), void *d) {
