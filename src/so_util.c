@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,12 +17,11 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
-/* Fallback, falls <elf.h> eines der Makros nicht kennt (aeltere Glibc). */
-#ifndef R_AARCH64_TLSDESC
-#define R_AARCH64_TLSDESC 1031
-#endif
 #ifndef R_AARCH64_COPY
 #define R_AARCH64_COPY 1024
+#endif
+#ifndef R_AARCH64_TLSDESC
+#define R_AARCH64_TLSDESC 1031
 #endif
 
 typedef struct {
@@ -36,7 +36,7 @@ typedef struct {
     Elf64_Rela *jmprel; size_t jmprelcount;
     void (**init_array)(void);
     size_t init_count;
-    void (*init_fn)(void);   /* NEU: DT_INIT */
+    void (*init_fn)(void);
 } so_module;
 
 #define MAX_MODULES 8
@@ -106,12 +106,10 @@ static void relocate(so_module *m, Elf64_Rela *rel, size_t count) {
         uint32_t type = ELF64_R_TYPE(r->r_info);
         uint32_t sym  = ELF64_R_SYM(r->r_info);
 
-        /* TLSDESC braucht 16 Byte (zwei Pointer), andere 8 Byte.
-         * Wir pruefen konservativ auf 16 Byte fuer alle, damit
-         * ein TLSDESC am Rand nicht in benachbarten Speicher schreibt. */
+        /* TLSDESC braucht 16 Byte, andere 8 Byte. Konservativ pruefen. */
         if (r->r_offset + 16 > m->size) {
-            LOGE("Ungueltiger Reloc-Offset 0x%lx (span=%zu) — ueberspringe",
-                 (unsigned long)r->r_offset, m->size);
+            LOGE("Ungueltiger Reloc-Offset 0x%lx — ueberspringe",
+                 (unsigned long)r->r_offset);
             continue;
         }
 
@@ -140,7 +138,9 @@ static void relocate(so_module *m, Elf64_Rela *rel, size_t count) {
                 break;
             }
 
-            /* NEU: R_AARCH64_COPY (1024) */
+            /* R_AARCH64_COPY (1024): Kopiert Bytes eines definierten
+             * Datensymbols aus einem Shared Object in den .bss-Slot
+             * der ladenden Bibliothek. */
             case R_AARCH64_COPY: {
                 if (sym >= m->symcount) { *ptr = 0; break; }
                 Elf64_Sym *s = &m->symtab[sym];
@@ -155,16 +155,13 @@ static void relocate(so_module *m, Elf64_Rela *rel, size_t count) {
                 if (sz > 0) {
                     if (r->r_offset + sz > m->size) sz = m->size - r->r_offset;
                     memcpy(ptr, src, sz);
+                    LOGI("COPY: %s -> %p (%zu Bytes)", name, ptr, sz);
                 }
                 break;
             }
 
-            /* NEU: R_AARCH64_TLSDESC (1031)
-             * Ohne echte TLS-Laufzeit koennen wir keinen Descriptor
-             * aufloesen. Wir setzen ihn auf {0,0}. Unity-IL2CPP
-             * nutzt TLS in aller Regel nicht im Init-Pfad; falls
-             * doch, crasht es spaeter kontrolliert und wir sehen
-             * es im Backtrace. */
+            /* R_AARCH64_TLSDESC (1031): 16-Byte-Descriptor.
+             * Ohne echte TLS-Laufzeit setzen wir ihn auf {0,0}. */
             case R_AARCH64_TLSDESC: {
                 static int warned = 0;
                 if (!warned) {
@@ -291,8 +288,6 @@ void *so_load(const char *path) {
         }
     }
 
-    /* AArch64-ABI: Elf64_Rela ist immer 24 Byte. DT_RELAENT wird
-     * oft weggelassen — wir defaulten dann auf 24. */
     if (rela_ent == 0) rela_ent = sizeof(Elf64_Rela);
     m->relacount = rela_sz / rela_ent;
     m->jmprelcount = jmprel_sz / sizeof(Elf64_Rela);
@@ -334,7 +329,6 @@ void *so_load(const char *path) {
     if (m->rela && m->relacount)     relocate(m, m->rela, m->relacount);
     if (m->jmprel && m->jmprelcount) relocate(m, m->jmprel, m->jmprelcount);
 
-    /* DT_INIT VOR init_array aufrufen (ld.so-Reihenfolge). */
     if (m->init_fn) {
         LOGI("=== DT_INIT @ %p ===", m->init_fn);
         m->init_fn();
