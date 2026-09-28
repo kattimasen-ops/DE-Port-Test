@@ -178,9 +178,6 @@ for f in "$DE_MAIN" "$DE_UNITY" "$DE_IL2CPP"; do
     else log "  [WARN] $f fehlt"; fi
 done
 
-# --- libc++_shared.so NUR uebernehmen, wenn sie im Repo liegt ---
-# Wenn nicht: kein Problem, sie muss direkt auf dem Geraet unter
-# /roms/ports/DeadEffect/lib/libc++_shared.so vorhanden sein.
 if [ -f "$GITHUB_WS/libs/libc++_shared.so" ]; then
     cp "$GITHUB_WS/libs/libc++_shared.so" "$WORK/de_libs/arm64-v8a/"
     log "  libc++_shared.so: $(stat -c%s "$GITHUB_WS/libs/libc++_shared.so") bytes (aus libs/)"
@@ -203,7 +200,7 @@ log "--- NativeLoader-Hints ---"
 cat "$JNI_META/nativeloader_hints.txt" 2>/dev/null | tee -a "$BUILD_LOG" || true
 
 # ------------------------------------------------------------
-# 6. Kompilieren (Quellen aus $GITHUB_WS/src/)
+# 6. Kompilieren
 # ------------------------------------------------------------
 log "===== STEP 6: Kompilieren ====="
 
@@ -286,11 +283,8 @@ else
 fi
 chmod +x port/DeadEffect/deadeffect-loader
 
-# Kopiert libmain/libunity/libil2cpp UND ggf. libc++_shared.so (falls im Repo)
 [ -d "$WORK/de_libs/arm64-v8a" ] && cp "$WORK"/de_libs/arm64-v8a/*.so port/DeadEffect/lib/ 2>/dev/null || true
 
-# Wenn eine DeadEffect.sh im Repo-Wurzelverzeichnis liegt, benutze sie.
-# Sonst Fallback-Inline-Version.
 if [ -f "$GITHUB_WS/DeadEffect.sh" ]; then
     cp "$GITHUB_WS/DeadEffect.sh" port/DeadEffect/DeadEffect.sh
     chmod +x port/DeadEffect/DeadEffect.sh
@@ -302,6 +296,8 @@ cat > port/DeadEffect/DeadEffect.sh <<'SHEOF'
 GAMEDIR="/roms/ports/DeadEffect"
 cd "$GAMEDIR"
 echo performance | sudo tee /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || true
+# WICHTIG: privates lib-Verzeichnis in den Suchpfad aufnehmen
+export LD_LIBRARY_PATH="$GAMEDIR/lib:$GAMEDIR:$LD_LIBRARY_PATH"
 export SDL_VIDEODRIVER=kmsdrm
 export SDL_AUDIODRIVER=alsa
 export SDL_ASSERT=always_ignore
