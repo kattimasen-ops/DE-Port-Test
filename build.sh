@@ -253,7 +253,6 @@ done
 
 if [ "$COMPILE_FAILED" = "1" ]; then
     log "[FEHLER] Mindestens eine Quelldatei fehlgeschlagen — Linken uebersprungen."
-    log "[FEHLER] Das verhindert einen unvollstaendigen Loader."
 else
     log "==> Linke Loader"
     (
@@ -261,27 +260,42 @@ else
     ) | tee -a "$BUILD_LOG"
 fi
 
+# ------------------------------------------------------------
+# Loader-Pruefung: Groesse UND Pflicht-Symbole
+# ------------------------------------------------------------
 LOADER_OK=0
 if [ -f deadeffect-loader ]; then
     SZ=$(stat -c%s deadeffect-loader)
-    if [ "$SZ" -lt 100000 ]; then
-        log "[WARN] Loader nur $SZ Bytes gross — vermutlich unvollstaendig"
+    SYM_OK=1
+    for want in slCreateEngine jni_find_native jni_dump_natives so_load; do
+        if ! aarch64-linux-gnu-nm deadeffect-loader 2>/dev/null | grep -q " T $want\$"; then
+            log "[WARN] Symbol '$want' fehlt im Loader"
+            SYM_OK=0
+        fi
+    done
+
+    if [ "$SZ" -lt 40000 ]; then
+        log "[FEHLER] Loader nur $SZ Bytes gross (vermutlich Fallback)"
+        LOADER_OK=0
+    elif [ "$SYM_OK" != "1" ]; then
+        log "[FEHLER] Loader fehlen Pflicht-Symbole — wird nicht uebernommen"
         LOADER_OK=0
     else
         LOADER_OK=1
-        log "[OK] Loader gebaut ($SZ Bytes)"
+        log "[OK] Loader gebaut und geprueft ($SZ Bytes)"
         file deadeffect-loader | tee -a "$BUILD_LOG"
         ls -la deadeffect-loader | tee -a "$BUILD_LOG"
         readelf -d deadeffect-loader 2>/dev/null | grep NEEDED | tee -a "$BUILD_LOG" || true
     fi
 else
-    log "[FEHLER] Linken fehlgeschlagen"
+    log "[FEHLER] Linken fehlgeschlagen — keine Loader-Datei vorhanden"
 fi
 
 {
     echo "=== Loader_ok: $LOADER_OK ==="
+    echo "=== Loader-Groesse: $(stat -c%s deadeffect-loader 2>/dev/null) Bytes ==="
     echo "=== Undefined symbols (falls vorhanden) ==="
-    [ -f deadeffect-loader ] && nm -D --undefined-only deadeffect-loader 2>/dev/null | head -200
+    [ -f deadeffect-loader ] && aarch64-linux-gnu-nm -D --undefined-only deadeffect-loader 2>/dev/null | head -200
 } > "$SYMS_FILE" 2>&1
 
 # ------------------------------------------------------------
@@ -294,8 +308,10 @@ mkdir -p port/DeadEffect/lib port/DeadEffect/assets
 
 if [ -f "$BUILD_SRC/deadeffect-loader" ] && [ "$LOADER_OK" = "1" ]; then
     cp "$BUILD_SRC/deadeffect-loader" port/DeadEffect/
+    log "[OK] Echter Loader ins Port-Paket kopiert ($(stat -c%s port/DeadEffect/deadeffect-loader) Bytes)"
 else
     printf '#!/bin/bash\necho "Loader nicht erfolgreich gebaut"\nexit 1\n' > port/DeadEffect/deadeffect-loader
+    log "[WARN] Fallback-Loader ins Port-Paket kopiert"
 fi
 chmod +x port/DeadEffect/deadeffect-loader
 
