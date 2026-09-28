@@ -3,8 +3,6 @@ name: Build Dead Effect Port
 on:
   push:
     branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
@@ -15,65 +13,57 @@ jobs:
       options: --privileged
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Prepare workdir
-        run: |
-          mkdir -p /work
-          # WORK explizit exportieren, damit build.sh es nutzt
-          echo "WORK=/work" >> $GITHUB_ENV
+      - uses: actions/checkout@v4
 
       - name: Run build.sh
+        shell: bash
+        continue-on-error: true
         env:
           DE_LIBS_URL: ${{ secrets.DE_LIBS_URL }}
-          # Optional: Setzen sobald wir den echten Klassennamen kennen
-          # DEAD_EFFECT_NATIVE_LOADER_CLASS: "com/bulkypix/deadeffect/NativeLoader"
         run: |
+          set +e
           chmod +x ./build.sh
-          ./build.sh
-          # Build.sh exitet immer 0 – Fehler werden über build_status.txt gemeldet
-        continue-on-error: false
+          bash ./build.sh
+          echo "build.sh exit: $?"
 
-      - name: Show build artifacts (Diagnose)
+      - name: Diagnose
         if: always()
+        shell: bash
         run: |
+          set +e
           echo "=== Workspace ==="
           ls -la "$GITHUB_WORKSPACE"
           echo ""
-          echo "=== ZIP vorhanden? ==="
-          ls -la "$GITHUB_WORKSPACE/DeadEffect-Port.zip" || echo "NICHT GEFUNDEN"
+          echo "=== work/ ==="
+          ls -la "$GITHUB_WORKSPACE/work" 2>/dev/null || echo "(kein work/)"
           echo ""
-          echo "=== Letzte 60 Zeilen build.log (falls verfügbar) ==="
-          if [ -f /work/build.log ]; then
-            tail -60 /work/build.log
-          else
-            echo "(kein build.log)"
-          fi
+          echo "=== Tail build.log ==="
+          tail -60 "$GITHUB_WORKSPACE/work/build.log" 2>/dev/null || echo "(kein log)"
 
-      - name: Upload Port-ZIP
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
           name: DeadEffect-Port
           path: DeadEffect-Port.zip
           if-no-files-found: warn
-          retention-days: 14
 
-      - name: Upload build.log
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
           name: build-log
-          path: /work/build.log
+          path: work/build.log
           if-no-files-found: warn
-          retention-days: 7
 
-      - name: Upload undefined-symbols
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
           name: undefined-symbols
-          path: /work/undefined_symbols.txt
+          path: work/undefined_symbols.txt
           if-no-files-found: warn
-          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jni-meta
+          path: work/jni_meta/
+          if-no-files-found: warn
