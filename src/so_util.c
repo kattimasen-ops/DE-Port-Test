@@ -256,10 +256,13 @@ void *so_load(const char *path) {
     if (m->jmprel && m->jmprelcount)   relocate(m, m->jmprel, m->jmprelcount);
 
     if (m->init_array && m->init_count) {
+        LOGI("=== init_array: %zu Eintraege ===", m->init_count);
         for (size_t i = 0; i < m->init_count; i++) {
             void (*fn)(void) = m->init_array[i];
+            LOGI("  init_array[%zu/%zu] = %p", i, m->init_count, fn);
             if (fn) fn();
         }
+        LOGI("=== init_array fertig ===");
     }
 
     munmap(fdata, fsize);
