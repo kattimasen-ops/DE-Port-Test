@@ -20,8 +20,13 @@
 /* ============================================================
  * Crash-Handler
  *
- * glibc's abort() setzt SIGABRT auf SIG_DFL zurueck.
- * Loesung: abort() selbst ueberschreiben.
+ * Hinweis zu abort():
+ *  - Unser Override wird benutzt, wenn Code via PLT abort() aufruft.
+ *  - glibc's interner Assert-Pfad (malloc, assert.h) umgeht den
+ *    PLT und ruft internen abort -> raise(SIGABRT) -> unser
+ *    SIGABRT-Handler wird aktiv.
+ *  - Damit beide Pfade einen Backtrace liefern, registrieren wir
+ *    zusaetzlich SIGABRT in main().
  * ============================================================ */
 void abort(void) {
     void *bt[64];
@@ -223,6 +228,7 @@ int main(int argc, char **argv) {
     signal(SIGBUS,  crash_handler);
     signal(SIGILL,  crash_handler);
     signal(SIGFPE,  crash_handler);
+    signal(SIGABRT, crash_handler);   /* NEU: faengt glibc-Assertions */
 
     LOGI("Dead Effect Loader startet");
     LOGI("  libdir = %s", DEAD_EFFECT_LIBDIR);
@@ -248,11 +254,4 @@ int main(int argc, char **argv) {
             jni_shim_handle_sdl_event(&ev);
         }
         if (unity_native_render && env) {
-            unity_native_render(env, NULL, (long long)SDL_GetTicks(), 640, 480);
-        }
-        SDL_GL_SwapWindow(sdl_win);
-    }
-    if (unity_native_pause && env) unity_native_pause(env, NULL);
-    LOGI("Loader beendet");
-    return 0;
-}
+            unity_native_render(env, NULL, (long long)SDL_GetTick
