@@ -60,16 +60,14 @@ int32_t ANativeWindow_setBuffersGeometry(ANativeWindow *w, int32_t width, int32_
     return 0;
 }
 ANativeWindow *ANativeWindow_fromSurface(void *env, void *surface) {
-    (void)env; (void)surface;
-    return g_android_window;
+    (void)env; (void)surface; return g_android_window;
 }
 
 /* ============================================================
- * ALooper (opaque in NDK -> Fake-Pointer)
+ * ALooper
  * ============================================================ */
 static int g_looper_dummy;
 static ALooper *g_looper = (ALooper *)&g_looper_dummy;
-
 ALooper *ALooper_prepare(int opts) { (void)opts; return g_looper; }
 ALooper *ALooper_forThread(void)   { return g_looper; }
 void ALooper_acquire(ALooper *l)   { (void)l; }
@@ -87,11 +85,10 @@ int ALooper_addFd(ALooper *l, int fd, int ident, int events, ALooper_callbackFun
 int ALooper_removeFd(ALooper *l, int fd) { return 1; }
 
 /* ============================================================
- * ASensor (opaque in NDK -> Fake-Pointer)
+ * ASensor
  * ============================================================ */
 static int g_sensor_mgr_dummy;
 static ASensorManager *g_sensor_mgr = (ASensorManager *)&g_sensor_mgr_dummy;
-
 ASensorManager *ASensorManager_getInstance(void) { return g_sensor_mgr; }
 ASensorManager *ASensorManager_getInstanceForPackage(const char *p) { (void)p; return g_sensor_mgr; }
 int ASensorManager_getSensorList(ASensorManager *m, ASensor const **list) { if (list) *list = NULL; return 0; }
@@ -143,30 +140,20 @@ const void *__system_property_find(const char *name) { (void)name; return NULL; 
 int __system_property_set(const char *name, const char *value) { return 0; }
 
 /* ============================================================
- * Unity-spezifische Symbole
+ * Unity
  * ============================================================ */
 int UnitySendMessage(const char *obj, const char *method, const char *msg) {
-    (void)obj; (void)method; (void)msg;
-    return 0;
+    (void)obj; (void)method; (void)msg; return 0;
 }
-
 FILE *__sF[3] = { NULL, NULL, NULL };
 unsigned char _binary_classes_dex_start[1] = {0};
 unsigned char _binary_classes_dex_end[1]   = {0};
 
 /* ============================================================
  * Libc-Kompatibilitaet (Bionic != glibc)
- *
- * WICHTIG: aarch64 Syscall-Nummern weichen von x86_64 ab!
- *   - newfstatat:  ARM64 = 79, x86_64 = 262
- *   - fstat:       ARM64 = 80, x86_64 = 5
- * Wir benutzen die ARM64-Werte direkt, weil dieser Code
- * auf einem ARM64-Gerät läuft.
  * ============================================================ */
-
 #define AARCH64_SYS_newfstatat 79
 #define AARCH64_SYS_fstat      80
-
 #ifndef AT_FDCWD
 #define AT_FDCWD -100
 #endif
@@ -174,7 +161,6 @@ unsigned char _binary_classes_dex_end[1]   = {0};
 #define AT_SYMLINK_NOFOLLOW 0x100
 #endif
 
-/* ----- stat / lstat / fstat ---------------------------------- */
 int stat(const char *path, struct stat *buf) {
     return (int)syscall(AARCH64_SYS_newfstatat, AT_FDCWD, path, buf, 0);
 }
@@ -186,13 +172,9 @@ int fstat(int fd, struct stat *buf) {
     return (int)syscall(AARCH64_SYS_fstat, fd, buf);
 }
 
-/* ----- __errno ---------------------------------------------- */
 extern int *__errno_location(void);
-int *__errno(void) {
-    return __errno_location();
-}
+int *__errno(void) { return __errno_location(); }
 
-/* ----- strlcpy ---------------------------------------------- */
 size_t strlcpy(char *dst, const char *src, size_t size) {
     size_t srclen = strlen(src);
     if (size > 0) {
@@ -203,7 +185,6 @@ size_t strlcpy(char *dst, const char *src, size_t size) {
     return srclen;
 }
 
-/* ----- __FD_SET_chk / __FD_ISSET_chk ------------------------ */
 void __FD_SET_chk(int fd, fd_set *set, size_t set_size) {
     (void)set_size;
     if (fd >= 0 && fd < FD_SETSIZE && set) FD_SET(fd, set);
@@ -214,7 +195,6 @@ int __FD_ISSET_chk(int fd, const fd_set *set, size_t set_size) {
     return 0;
 }
 
-/* ----- pthread_atfork --------------------------------------- */
 extern int __register_atfork(void (*prepare)(void),
                              void (*parent)(void),
                              void (*child)(void),
@@ -223,4 +203,85 @@ int pthread_atfork(void (*prepare)(void),
                    void (*parent)(void),
                    void (*child)(void)) {
     return __register_atfork(prepare, parent, child, NULL);
+}
+
+/* ============================================================
+ * NEU: Fortify (_chk) Wrapper — aus den Switch-Ports
+ *
+ * Android-Builds mit _FORTIFY_SOURCE=2 importieren diese
+ * Symbole aus libc. glibc stellt sie nicht bereit → Linker
+ * unresolved → wir liefern hier Durchreiche-Implementierungen.
+ * ============================================================ */
+void *__memcpy_chk(void *dst, const void *src, size_t n, size_t dstlen) {
+    (void)dstlen; return memcpy(dst, src, n);
+}
+void *__memmove_chk(void *dst, const void *src, size_t n, size_t dstlen) {
+    (void)dstlen; return memmove(dst, src, n);
+}
+void *__memset_chk(void *dst, int c, size_t n, size_t dstlen) {
+    (void)dstlen; return memset(dst, c, n);
+}
+char *__strcpy_chk(char *dst, const char *src, size_t dstlen) {
+    (void)dstlen; return strcpy(dst, src);
+}
+char *__strncpy_chk(char *dst, const char *src, size_t n, size_t dstlen) {
+    (void)dstlen; return strncpy(dst, src, n);
+}
+char *__strncpy_chk2(char *dst, const char *src, size_t n,
+                     size_t dstlen, size_t srclen) {
+    (void)dstlen; (void)srclen; return strncpy(dst, src, n);
+}
+char *__strcat_chk(char *dst, const char *src, size_t dstlen) {
+    (void)dstlen; return strcat(dst, src);
+}
+char *__strncat_chk(char *dst, const char *src, size_t n, size_t dstlen) {
+    (void)dstlen; return strncat(dst, src, n);
+}
+size_t __strlen_chk(const char *s, size_t slen) {
+    (void)slen; return strlen(s);
+}
+char *__strchr_chk(const char *s, int c, size_t slen) {
+    (void)slen; return strchr(s, c);
+}
+char *__strrchr_chk(const char *s, int c, size_t slen) {
+    (void)slen; return strrchr(s, c);
+}
+int __snprintf_chk(char *s, size_t maxlen, int flag, size_t slen,
+                   const char *fmt, ...) {
+    (void)flag; (void)slen;
+    va_list ap; va_start(ap, fmt);
+    int r = vsnprintf(s, maxlen, fmt, ap);
+    va_end(ap); return r;
+}
+int __vsnprintf_chk(char *s, size_t maxlen, int flag, size_t slen,
+                    const char *fmt, va_list ap) {
+    (void)flag; (void)slen;
+    return vsnprintf(s, maxlen, fmt, ap);
+}
+int __sprintf_chk(char *s, int flag, size_t slen, const char *fmt, ...) {
+    (void)flag; (void)slen;
+    va_list ap; va_start(ap, fmt);
+    int r = vsprintf(s, fmt, ap);
+    va_end(ap); return r;
+}
+int __vsprintf_chk(char *s, int flag, size_t slen,
+                   const char *fmt, va_list ap) {
+    (void)flag; (void)slen;
+    return vsprintf(s, fmt, ap);
+}
+int __printf_chk(int flag, const char *fmt, ...) {
+    (void)flag;
+    va_list ap; va_start(ap, fmt);
+    int r = vprintf(fmt, ap);
+    va_end(ap); return r;
+}
+int __fprintf_chk(FILE *stream, int flag, const char *fmt, ...) {
+    (void)flag;
+    va_list ap; va_start(ap, fmt);
+    int r = vfprintf(stream, fmt, ap);
+    va_end(ap); return r;
+}
+int __vfprintf_chk(FILE *stream, int flag, const char *fmt, va_list ap) {
+    (void)flag;
+    return vfprintf(stream, fmt, ap);
 }
