@@ -35,25 +35,65 @@ typedef struct {
 static so_module g_modules[MAX_MODULES];
 static int g_nmods = 0;
 
-/* Resolve symbol name: first from our own exports (loader linked -rdynamic),
- * then from system libs. */
-static void *resolve_symbol(const char *name) {
+/* Cache fuer wiederholte Symbol-Lookups waehrend der Relocation */
+#define SYM_CACHE_SIZE 512
+static struct {
+    const char *name;
+    void *addr;
+} g_sym_cache[SYM_CACHE_SIZE];
+static int g_sym_cache_next = 0;
+
+static void *resolve_symbol_full(const char *name) {
+    /* 1. In eigenen geladenen Modulen suchen (fuer Self-Referenzen) */
+    for (int i = 0; i < g_nmods; i++) {
+        so_module *m = &g_modules[i];
+        if (!m->symtab || !m->strtab) continue;
+        for (size_t j = 0; j < m->symcount; j++) {
+            Elf64_Sym *s = &m->symtab[j];
+            if (s->st_shndx == SHN_UNDEF) continue;
+            if (!s->st_name) continue;
+            if (strcmp(m->strtab + s->st_name, name) == 0) {
+                return (char *)m->base + s->st_value;
+            }
+        }
+    }
+
+    /* 2. In unserem eigenen Prozess (Loader-Exporte) */
     void *p = dlsym(RTLD_DEFAULT, name);
     if (p) return p;
-    static void *sys_libs[10] = {0};
+
+    /* 3. In System-Bibliotheken (libc++_shared.so ZUERST!) */
+    static void *sys_libs[12] = {0};
     static const char *sys_names[] = {
+        "libc++_shared.so",
         "libc.so.6", "libm.so.6", "libdl.so.2", "libpthread.so.0",
         "libEGL.so.1", "libGLESv2.so.2", "libGLESv1_CM.so.1",
-        "libSDL2-2.0.so.0", "libz.so.1", "libstdc++.so.6"
+        "libSDL2-2.0.so.0", "libz.so.1", "libstdc++.so.6",
+        NULL
     };
-    for (size_t i = 0; i < sizeof(sys_names)/sizeof(*sys_names); i++) {
-        if (!sys_libs[i]) sys_libs[i] = dlopen(sys_names[i], RTLD_NOW | RTLD_GLOBAL);
+    for (size_t i = 0; sys_names[i]; i++) {
+        if (!sys_libs[i]) {
+            sys_libs[i] = dlopen(sys_names[i], RTLD_NOW | RTLD_GLOBAL);
+        }
         if (sys_libs[i]) {
             p = dlsym(sys_libs[i], name);
             if (p) return p;
         }
     }
     return NULL;
+}
+
+static void *resolve_symbol_cached(const char *name) {
+    for (int i = 0; i < SYM_CACHE_SIZE; i++) {
+        if (g_sym_cache[i].name && strcmp(g_sym_cache[i].name, name) == 0) {
+            return g_sym_cache[i].addr;
+        }
+    }
+    void *addr = resolve_symbol_full(name);
+    g_sym_cache[g_sym_cache_next].name = name;
+    g_sym_cache[g_sym_cache_next].addr = addr;
+    g_sym_cache_next = (g_sym_cache_next + 1) % SYM_CACHE_SIZE;
+    return addr;
 }
 
 static void relocate(so_module *m, Elf64_Rela *rel, size_t count) {
@@ -74,7 +114,7 @@ static void relocate(so_module *m, Elf64_Rela *rel, size_t count) {
                                    ? m->strtab + m->symtab[sym].st_name
                                    : NULL;
                 if (!name || !*name) { *ptr = 0; break; }
-                void *res = resolve_symbol(name);
+                void *res = resolve_symbol_cached(name);
                 if (!res) {
                     LOGE("Unresolved: %s", name);
                     *ptr = 0;
@@ -169,7 +209,6 @@ void *so_load(const char *path) {
     if (rela_ent) m->relacount = rela_sz / rela_ent;
     m->jmprelcount = jmprel_sz / sizeof(Elf64_Rela);
 
-    /* Symbol count: prefer SysV hash, else GNU hash, else 65536 (upper bound). */
     if (sysv_hash) {
         m->symcount = sysv_hash[1];
     } else if (gnu_hash) {
@@ -196,6 +235,13 @@ void *so_load(const char *path) {
     }
     LOGI("  symcount=%zu rela=%zu jmprel=%zu init=%zu",
          m->symcount, m->relacount, m->jmprelcount, m->init_count);
+
+    /* Sym-Cache leeren, damit der aktuelle Modul-Symbolstand aktuell ist */
+    for (int i = 0; i < SYM_CACHE_SIZE; i++) {
+        g_sym_cache[i].name = NULL;
+        g_sym_cache[i].addr = NULL;
+    }
+    g_sym_cache_next = 0;
 
     if (m->rela && m->relacount)       relocate(m, m->rela, m->relacount);
     if (m->jmprel && m->jmprelcount)   relocate(m, m->jmprel, m->jmprelcount);
@@ -225,10 +271,9 @@ void *so_find_addr(void *handle, const char *name) {
     return NULL;
 }
 
-void so_flush_caches(void) { /* no-op on Linux */ }
+void so_flush_caches(void) { /* no-op */ }
 void so_set_imports(void)  { /* no-op */ }
 
-/* Diagnose: zeigt interessante Symbole (JNI_OnLoad, UnityPlayer, il2cpp_*, NativeLoader) */
 void so_dump_symbols(void *handle) {
     so_module *m = handle;
     if (!m || !m->symtab || !m->strtab) return;
