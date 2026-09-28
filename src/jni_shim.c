@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,6 +31,23 @@ void jni_shim_set_egl(EGLDisplay d, EGLSurface s, EGLContext c) {
 void jni_shim_handle_sdl_event(SDL_Event *ev) { (void)ev; }
 
 /* ============================================================
+ * Native-Method-Registry
+ * Wird von jni_env_RegisterNatives gefuellt, wenn libunity
+ * (bzw. libmain/libil2cpp) ihre JNI-Natives anmeldet.
+ * ============================================================ */
+#define JNI_MAX_NATIVES 256
+
+typedef struct {
+    const char *class_name;   /* aktuell ungenutzt, siehe jni_find_native */
+    const char *method_name;
+    const char *signature;
+    void       *fn_ptr;
+} jni_native_entry;
+
+static jni_native_entry g_natives[JNI_MAX_NATIVES];
+static int              g_native_count = 0;
+
+/* ============================================================
  * Fake JNIEnv + JavaVM
  *
  * Ein JNIEnv ist ein Zeiger auf ein Struct, dessen erstes Feld
@@ -43,9 +59,6 @@ void jni_shim_handle_sdl_event(SDL_Event *ev) { (void)ev; }
 /* Default-Stub: gibt 0 zurueck. Fuer alle Slots die wir nicht
  * brauchen. Unsauber vom Typprofil her, aber funktioniert auf ARM. */
 static uintptr_t jni_default_stub(void) { return 0; }
-
-/* Spezielle Stubs die etwas anderes brauchen */
-static void jni_void_stub(void) { }
 
 /* Wir nehmen eine ueberdimensionierte Tabelle, damit auch bei
  * einer abweichenden JNI-Header-Version nichts daneben geht. */
@@ -108,7 +121,6 @@ static int jni_env_GetVersion(void *env) {
 static void *jni_env_FindClass(void *env, const char *name) {
     (void)env;
     LOGI("JNI FindClass(%s)", name ? name : "?");
-    /* Fake-Klasse: Zeiger auf statisches Objekt ungleich NULL */
     static int fake_class = 1;
     return &fake_class;
 }
@@ -151,11 +163,30 @@ static void *jni_env_GetStaticFieldID(void *env, void *cls,
     return &fake_fid;
 }
 
+/* --- RegisterNatives: speichert in Registry --- */
 static int jni_env_RegisterNatives(void *env, void *cls,
                                    const void *methods, int n) {
-    (void)env; (void)cls; (void)methods;
-    LOGI("JNI RegisterNatives(count=%d)", n);
-    return 0;  /* Erfolg */
+    (void)env; (void)cls;
+    const struct {
+        const char *name;
+        const char *signature;
+        void       *fnPtr;
+    } *m = (const void *)methods;
+
+    if (!m || n <= 0) {
+        LOGI("JNI RegisterNatives(count=%d) — leer", n);
+        return 0;
+    }
+
+    for (int i = 0; i < n && g_native_count < JNI_MAX_NATIVES; i++) {
+        g_natives[g_native_count].class_name  = NULL;
+        g_natives[g_native_count].method_name = m[i].name;
+        g_natives[g_native_count].signature   = m[i].signature;
+        g_natives[g_native_count].fn_ptr      = m[i].fnPtr;
+        g_native_count++;
+    }
+    LOGI("JNI RegisterNatives(count=%d), total=%d", n, g_native_count);
+    return 0;
 }
 
 static int jni_env_UnregisterNatives(void *env, void *cls) {
@@ -165,7 +196,7 @@ static int jni_env_UnregisterNatives(void *env, void *cls) {
 
 static void *jni_env_NewGlobalRef(void *env, void *obj) {
     (void)env;
-    return obj;  /* Zeiger unveraendert weiterreichen */
+    return obj;
 }
 
 static void *jni_env_NewLocalRef(void *env, void *obj) {
@@ -178,14 +209,12 @@ static void jni_env_DeleteLocalRef(void *env, void *obj)  { (void)env; (void)obj
 
 static int jni_env_IsSameObject(void *env, void *a, void *b) {
     (void)env;
-    return (a == b) ? 1 : 0;  /* JNI_TRUE / JNI_FALSE */
+    return (a == b) ? 1 : 0;
 }
 
 static void *jni_env_NewStringUTF(void *env, const char *utf) {
     (void)env;
     LOGI("JNI NewStringUTF(%s)", utf ? utf : "(null)");
-    /* Wir verpacken den Zeiger auf den String als "jstring".
-     * GetStringUTFChars liefert ihn dann unveraendert zurueck. */
     return (void *)utf;
 }
 
@@ -213,7 +242,7 @@ static int jni_env_GetStringLength(void *env, void *jstr) {
 
 static void *jni_env_ExceptionOccurred(void *env) {
     (void)env;
-    return NULL;  /* Keine Exception */
+    return NULL;
 }
 
 static void jni_env_ExceptionDescribe(void *env) { (void)env; }
@@ -238,8 +267,6 @@ static void *jni_env_AllocObject(void *env, void *cls) {
     return &fake_obj;
 }
 
-/* CallXxxMethod-Serie: alle geben 0 zurueck.
- * Wir brauchen nur die haeufigsten Signaturen. */
 static uintptr_t jni_env_CallObjectMethod(void *env, void *obj, void *mid, ...) {
     (void)env; (void)obj; (void)mid;
     return 0;
@@ -269,7 +296,6 @@ static uintptr_t jni_env_CallStaticIntMethod(void *env, void *cls, void *mid, ..
     return 0;
 }
 
-/* Arrays */
 static void *jni_env_NewByteArray(void *env, int len) {
     (void)env; (void)len;
     static int fake_arr = 1;
@@ -284,7 +310,6 @@ static int jni_env_GetArrayLength(void *env, void *arr) {
  * Tabellen initialisieren
  * ============================================================ */
 
-/* JNIEnv-Indices (Standard JNI-Spec, Android NDK jni.h) */
 #define ENV_GetVersion              4
 #define ENV_DefineClass             5
 #define ENV_FindClass               6
@@ -330,7 +355,6 @@ static int jni_env_GetArrayLength(void *env, void *arr) {
 #define ENV_GetJavaVM             219
 #define ENV_ExceptionCheck        228
 
-/* JavaVM-Indices */
 #define VM_DestroyJavaVM                  3
 #define VM_AttachCurrentThread            4
 #define VM_DetachCurrentThread            5
@@ -343,7 +367,6 @@ static void jni_init_tables(void) {
     if (g_jni_initialized) return;
     g_jni_initialized = 1;
 
-    /* Alle Slots mit Default-Stub fuellen */
     for (int i = 0; i < JNI_TABLE_SIZE; i++) {
         g_env_table[i] = (uintptr_t)jni_default_stub;
     }
@@ -351,7 +374,6 @@ static void jni_init_tables(void) {
         g_vm_table[i] = (uintptr_t)jni_default_stub;
     }
 
-    /* JNIEnv-Slots fuellen */
     g_env_table[ENV_GetVersion]            = (uintptr_t)jni_env_GetVersion;
     g_env_table[ENV_FindClass]             = (uintptr_t)jni_env_FindClass;
     g_env_table[ENV_ExceptionOccurred]     = (uintptr_t)jni_env_ExceptionOccurred;
@@ -389,13 +411,11 @@ static void jni_init_tables(void) {
     g_env_table[ENV_GetJavaVM]             = (uintptr_t)jni_env_GetJavaVM;
     g_env_table[ENV_ExceptionCheck]        = (uintptr_t)jni_env_ExceptionCheck;
 
-    /* JavaVM-Slots fuellen */
-    g_vm_table[VM_DestroyJavaVM]      = (uintptr_t)jni_vm_DestroyJavaVM;
-    g_vm_table[VM_AttachCurrentThread]= (uintptr_t)jni_vm_AttachCurrentThread;
-    g_vm_table[VM_DetachCurrentThread]= (uintptr_t)jni_vm_DetachCurrentThread;
-    g_vm_table[VM_GetEnv]             = (uintptr_t)jni_vm_GetEnv;
+    g_vm_table[VM_DestroyJavaVM]       = (uintptr_t)jni_vm_DestroyJavaVM;
+    g_vm_table[VM_AttachCurrentThread] = (uintptr_t)jni_vm_AttachCurrentThread;
+    g_vm_table[VM_DetachCurrentThread] = (uintptr_t)jni_vm_DetachCurrentThread;
+    g_vm_table[VM_GetEnv]              = (uintptr_t)jni_vm_GetEnv;
 
-    /* Singletons verdrahten */
     g_env_singleton.functions = (void *)g_env_table;
     g_vm_singleton.functions  = (void *)g_vm_table;
 
@@ -411,6 +431,35 @@ void *jni_get_env(void) {
 void *jni_get_vm(void) {
     jni_init_tables();
     return &g_vm_singleton;
+}
+
+/* ============================================================
+ * Native-Method-Registry: Ausgabe + Suche
+ * ============================================================ */
+void jni_dump_natives(void) {
+    jni_init_tables();
+    LOGI("=== JNI Registry: %d Methoden ===", g_native_count);
+    for (int i = 0; i < g_native_count; i++) {
+        LOGI("  [%3d] %s -> %p",
+             i,
+             g_natives[i].method_name ? g_natives[i].method_name : "?",
+             g_natives[i].fn_ptr);
+    }
+}
+
+void *jni_find_native(const char *class_name, const char *method_name) {
+    (void)class_name;  /* aktuell nur nach Methodenname suchen,
+                        * da FindClass() allen Klassen denselben
+                        * Fake-Zeiger liefert. */
+    jni_init_tables();
+    if (!method_name) return NULL;
+    for (int i = 0; i < g_native_count; i++) {
+        if (g_natives[i].method_name &&
+            strcmp(g_natives[i].method_name, method_name) == 0) {
+            return g_natives[i].fn_ptr;
+        }
+    }
+    return NULL;
 }
 
 /* ============================================================
