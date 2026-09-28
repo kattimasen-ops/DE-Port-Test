@@ -177,21 +177,37 @@ for f in "$DE_MAIN" "$DE_UNITY" "$DE_IL2CPP"; do
 done
 
 # ---- libc++_shared.so beschaffen und fuer glibc patchen --------------------
+# Sucht an allen plausiblen Stellen. Erste Fundstelle gewinnt.
+# Reihenfolge: Repo-Root -> libs/ -> lib/ -> src/ -> ZIP
 LIBCXX_SRC=""
-if [ -f "$WORK/de_libs/arm64-v8a/libc++_shared.so" ]; then
-    LIBCXX_SRC="$WORK/de_libs/arm64-v8a/libc++_shared.so"
-    log "  libc++_shared.so: gefunden im ZIP"
-elif [ -f "$GITHUB_WS/libs/libc++_shared.so" ]; then
-    LIBCXX_SRC="$GITHUB_WS/libs/libc++_shared.so"
-    log "  libc++_shared.so: gefunden in libs/ im Repo"
-else
-    log "  [INFO] libc++_shared.so nicht im ZIP und nicht in libs/."
-    log "         Auf dem Geraet wird sie von fix_libcxx.sh gepatcht."
+for cand in \
+    "$GITHUB_WS/libc++_shared.so" \
+    "$GITHUB_WS/libs/libc++_shared.so" \
+    "$GITHUB_WS/lib/libc++_shared.so" \
+    "$GITHUB_WS/src/libc++_shared.so" \
+    "$WORK/de_libs/arm64-v8a/libc++_shared.so" \
+    ; do
+    if [ -f "$cand" ]; then
+        LIBCXX_SRC="$cand"
+        log "  libc++_shared.so: gefunden unter $cand"
+        break
+    fi
+done
+
+if [ -z "$LIBCXX_SRC" ]; then
+    log "  [INFO] libc++_shared.so nirgends gefunden."
+    log "         Erwartet im Repo-Root, libs/, lib/, src/ oder im ZIP."
+    log "         Auf dem Geraet wird sie dann von fix_libcxx.sh gepatcht."
 fi
 
 if [ -n "$LIBCXX_SRC" ]; then
     cp "$LIBCXX_SRC" "$WORK/de_libs/arm64-v8a/libc++_shared.so"
     LIBCXX_DST="$WORK/de_libs/arm64-v8a/libc++_shared.so"
+
+    log "  libc++ Ziel: $LIBCXX_DST ($(stat -c%s "$LIBCXX_DST") Bytes)"
+    log "  libc++ Arch: $(file -b "$LIBCXX_DST" | head -1)"
+    log "  libc++ NEEDED (vor Patch):"
+    readelf -d "$LIBCXX_DST" 2>/dev/null | grep NEEDED | tee -a "$BUILD_LOG" || true
 
     if ! command -v patchelf >/dev/null 2>&1; then
         log "  [WARN] patchelf fehlt — ueberspringe Patch"
@@ -211,7 +227,7 @@ if [ -n "$LIBCXX_SRC" ]; then
             patchelf --replace-needed libstdc++.so libstdc++.so.6 "$LIBCXX_DST" 2>&1 | tee -a "$BUILD_LOG" || true
             patchelf --replace-needed liblog.so    libc.so.6      "$LIBCXX_DST" 2>&1 | tee -a "$BUILD_LOG" || true
 
-            log "  [PATCH] neue NEEDED-Eintraege:"
+            log "  [PATCH] libc++ NEEDED (nach Patch):"
             readelf -d "$LIBCXX_DST" 2>/dev/null | grep NEEDED | tee -a "$BUILD_LOG" || true
         else
             log "  libc++ hat bereits glibc-Namen — kein Patch noetig"
@@ -388,7 +404,7 @@ SHEOF
 chmod +x port/DeadEffect/DeadEffect.sh
 fi
 
-# NEU: fix_libcxx.sh ins Port-Paket
+# fix_libcxx.sh ins Port-Paket (Fallback fuer das Geraet)
 if [ -f "$GITHUB_WS/fix_libcxx.sh" ]; then
     cp "$GITHUB_WS/fix_libcxx.sh" port/DeadEffect/fix_libcxx.sh
     chmod +x port/DeadEffect/fix_libcxx.sh
