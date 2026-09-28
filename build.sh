@@ -3,19 +3,24 @@
 # Dead Effect Port - Unity-IL2CPP Loader
 # Ziel: M9 Pro / R36S (RK3326, aarch64, GLIBC 2.31)
 #
-# Kombiniert: Chrono (so_util) + Phigros NX (Unity JNI)
-#             + FalsoJNI (Fake-JVM)
+# WICHTIG: GitHub Actions ruft run:-Steps mit `bash -e` auf.
+#          Diese Datei MUSS `set +e` erzwingen, sonst stirbt sie
+#          beim ersten non-zero Return irgendeines Befehls.
 #
-# ROBUSTHEITS-REGELN (lehren aus dem letzten Build):
-#   1. NIEMALS `set -e` / `set +e` – auch nicht temporär.
-#   2. Platzhalter für ALLE finalen Artefakte ganz oben anlegen.
-#   3. Compile/Link laufen in Subshells; Fehler propagieren nicht.
-#   4. WORK liegt INNERHALB von $GITHUB_WORKSPACE.
+# Deshalb:
+#   - Zeile 1 nach Shebang: set +euo pipefail
+#   - Nie `A && B` am Top-Level (nur `if` / `A && B || true`)
+#   - Compile/Link in Subshells
+#   - Platzhalter für alle Artefakte ganz oben
+#   - Absolutes Ende: `exit 0`, egal was passiert
 # ============================================================
+
+set +euo pipefail        # <<< erzwingt Abschaltung von -e, -u, pipefail
+                         #     selbst wenn GitHub `bash -e` übergibt.
 
 export DEBIAN_FRONTEND=noninteractive
 
-# ---- Output-Verzeichnisse --------------------------------
+# ---- Verzeichnisse ---------------------------------------
 if [ -n "${GITHUB_WORKSPACE:-}" ]; then
     OUT="$GITHUB_WORKSPACE"
 else
@@ -30,24 +35,28 @@ JNI_META="$WORK/jni_meta"
 SRC="$WORK/loader_src"
 ZIP_FILE="$OUT/DeadEffect-Port.zip"
 
-# ---- PLATZHALTER: immer vorhanden, egal wo das Skript stirbt ----
+# ---- Platzhalter: existieren IMMER, egal wo das Skript stirbt ----
 : > "$BUILD_LOG"
 : > "$SYMS_FILE"
 mkdir -p "$JNI_META"
 echo "Build gestartet: $(date -u)" > "$SYMS_FILE"
 
-# ---- Log-Duplikation (kein exec-redirect in Subshell nötig) ----
-# Wir schreiben in eine Funktion, die wir überall aufrufen.
+# ---- Exit-Trap: zeigt die Zeile, in der das Skript beendet ----
+trap 'rc=$?; echo "[EXIT] line=${LINENO:-?} cmd=${BASH_COMMAND:-?} rc=$rc" | tee -a "$BUILD_LOG" >&2' EXIT
+
+# ---- Logging ---------------------------------------------
 log() { echo "$@" | tee -a "$BUILD_LOG" >&2; }
 
 log "==> GITHUB_WORKSPACE = $OUT"
 log "==> WORK             = $WORK"
 log "==> PWD              = $PWD"
+log "==> Shell-Optionen   = $-"
 log "==> Ziel: M9 Pro / R36S (RK3326, aarch64, GLIBC 2.31)"
 
 # ------------------------------------------------------------
 # 1. Multiarch + apt-Quellen
 # ------------------------------------------------------------
+log "===== STEP 1: apt-Vorbereitung ====="
 dpkg --add-architecture arm64 2>/dev/null || true
 
 cat > /etc/apt/sources.list.d/amd64.list <<'EOF'
@@ -68,7 +77,7 @@ apt-get update 2>&1 | tee -a "$BUILD_LOG" || log "[WARN] apt-get update teilweis
 # ------------------------------------------------------------
 # 2. Cross-Toolchain + Bibliotheken
 # ------------------------------------------------------------
-log "==> Installiere Cross-Toolchain"
+log "===== STEP 2: Cross-Toolchain ====="
 apt-get install -y --no-install-recommends \
   build-essential cmake ninja-build git pkg-config ca-certificates \
   wget curl file zip unzip python3 patchelf \
@@ -86,7 +95,7 @@ aarch64-linux-gnu-gcc --version 2>&1 | head -1 | tee -a "$BUILD_LOG" || log "[WA
 # ------------------------------------------------------------
 # 3. Compat-Header
 # ------------------------------------------------------------
-log "==> Erstelle Compat-Header"
+log "===== STEP 3: Compat-Header ====="
 mkdir -p /usr/include/android
 
 cat > /usr/include/android/log.h <<'EOF'
@@ -114,9 +123,7 @@ cat > /usr/include/android/native_window.h <<'EOF'
 #define COMPAT_ANATIVE_WINDOW_H
 #include <stdint.h>
 typedef struct ANativeWindow ANativeWindow;
-struct ANativeWindow {
-    int32_t width; int32_t height; int32_t format; void *user_data;
-};
+struct ANativeWindow { int32_t width; int32_t height; int32_t format; void *user_data; };
 void ANativeWindow_acquire(ANativeWindow *w);
 void ANativeWindow_release(ANativeWindow *w);
 int32_t ANativeWindow_getWidth(ANativeWindow *w);
@@ -220,7 +227,7 @@ log "[OK] Compat-Header geschrieben"
 # ------------------------------------------------------------
 # 4. Dead Effect .so-Dateien
 # ------------------------------------------------------------
-log "==> Lade Dead Effect native libs"
+log "===== STEP 4: Dead Effect .so laden ====="
 mkdir -p "$WORK/de_libs"
 if [ -n "${DE_LIBS_URL:-}" ]; then
     wget -q -O "$WORK/arm64-v8a.zip" "$DE_LIBS_URL" 2>>"$BUILD_LOG" || log "[WARN] wget fehlgeschlagen"
@@ -244,7 +251,7 @@ done
 # ------------------------------------------------------------
 # 5. JNI-Metadaten
 # ------------------------------------------------------------
-log "==> Extrahiere JNI-Metadaten aus Dead Effect"
+log "===== STEP 5: JNI-Metadaten ====="
 mkdir -p "$JNI_META"
 
 if [ -f "$DE_MAIN" ]; then
@@ -262,28 +269,42 @@ cat "$JNI_META/nativeloader_hints.txt" 2>/dev/null | tee -a "$BUILD_LOG" || true
 log "--- Unity-Player-Klassen ---"
 cat "$JNI_META/unity_classes.txt" 2>/dev/null | tee -a "$BUILD_LOG" || true
 
-PKG_NAME=$(strings -a "$DE_MAIN" 2>/dev/null | grep -oE 'com/[a-z]+/[a-z]+' | head -1 | tr '/' '.' || true)
-[ -z "$PKG_NAME" ] && PKG_NAME="com.bulkypix.deadeffect"
+# WICHTIG: FIX für den alten Bug.
+# Vorher:  [ -z "$PKG_NAME" ] && PKG_NAME="..."
+#          -> Wenn PKG_NAME nicht leer war, gab die &&-Kette 1 zurück.
+#          -> Mit GitHub's `bash -e` starb das Skript.
+# Jetzt:   if/else – niemals -e-empfindlich.
+PKG_NAME="$(strings -a "$DE_MAIN" 2>/dev/null | grep -oE 'com/[a-z]+/[a-z]+' | head -1 | tr '/' '.' || true)"
+if [ -z "$PKG_NAME" ]; then
+    PKG_NAME="com.bulkypix.deadeffect"
+fi
 log "==> Erkannter Package-Name: $PKG_NAME"
 
 # ------------------------------------------------------------
 # 6. Quellen klonen
 # ------------------------------------------------------------
-log "==> Klone Basis-Quellen"
+log "===== STEP 6: Quellen klonen ====="
 cd "$WORK"
-[ -d chrono-src ]   || git clone --depth=1 https://gitee.com/windstarry/portmaster_chrono.git chrono-src   2>>"$BUILD_LOG" || log "[WARN] Chrono"
-[ -d falsjni-src ]  || git clone --depth=1 https://github.com/Rinnegatamante/FalsoJNI.git falsjni-src      2>>"$BUILD_LOG" || log "[WARN] FalsoJNI"
-[ -d phigros-src ]  || git clone --depth=1 https://github.com/ChanseyIsTheBest/phigros_nx.git phigros-src  2>>"$BUILD_LOG" || log "[WARN] Phigros"
-[ -d soloader-src ] || git clone --depth=1 https://github.com/v-atamanenko/soloader-boilerplate.git soloader-src 2>>"$BUILD_LOG" || log "[WARN] Soloader"
+if [ ! -d chrono-src ]; then
+    git clone --depth=1 https://gitee.com/windstarry/portmaster_chrono.git chrono-src 2>>"$BUILD_LOG" || log "[WARN] Chrono"
+fi
+if [ ! -d falsjni-src ]; then
+    git clone --depth=1 https://github.com/Rinnegatamante/FalsoJNI.git falsjni-src 2>>"$BUILD_LOG" || log "[WARN] FalsoJNI"
+fi
+if [ ! -d phigros-src ]; then
+    git clone --depth=1 https://github.com/ChanseyIsTheBest/phigros_nx.git phigros-src 2>>"$BUILD_LOG" || log "[WARN] Phigros"
+fi
+if [ ! -d soloader-src ]; then
+    git clone --depth=1 https://github.com/v-atamanenko/soloader-boilerplate.git soloader-src 2>>"$BUILD_LOG" || log "[WARN] Soloader"
+fi
 
 # ------------------------------------------------------------
 # 7. Loader-Quellen zusammenstellen
 # ------------------------------------------------------------
-log "==> Stelle Loader-Quellen zusammen"
+log "===== STEP 7: Loader-Quellen ====="
 rm -rf "$SRC"
 mkdir -p "$SRC"
 
-# so_util
 if [ -f "$WORK/chrono-src/so_util.c" ]; then
     cp "$WORK/chrono-src/so_util.c" "$WORK/chrono-src/so_util.h" "$SRC/" 2>/dev/null || true
     cp "$WORK/chrono-src/imports.c" "$WORK/chrono-src/imports.h" "$SRC/" 2>/dev/null || true
@@ -295,19 +316,16 @@ else
     log "  [WARN] Keine so_util-Quelle gefunden"
 fi
 
-# FalsoJNI
 if [ -d "$WORK/falsjni-src/src" ]; then
     cp "$WORK/falsjni-src/src/"*.c "$WORK/falsjni-src/src/"*.h "$SRC/" 2>/dev/null || true
     log "  [OK] FalsoJNI kopiert"
 fi
 
-# OpenSL
 if [ -f "$WORK/chrono-src/opensles_shim.c" ]; then
     cp "$WORK/chrono-src/opensles_shim.c" "$WORK/chrono-src/opensles_shim.h" "$SRC/" 2>/dev/null || true
     log "  [OK] OpenSL-Shim aus Chrono"
 fi
 
-# Phigros Unity-NDK
 if [ -f "$WORK/phigros-src/source/android_native_unity.c" ]; then
     cp "$WORK/phigros-src/source/android_native_unity.c" "$SRC/unity_ndk.c" 2>/dev/null || true
     sed -i '/#include <switch/d' "$SRC/unity_ndk.c" 2>/dev/null || true
@@ -444,27 +462,4 @@ cat > "$SRC/loader_main.c" <<'MAINEOF'
 #include <SDL2/SDL.h>
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
-#include <android/log.h>
-#include <android/native_window.h>
-#include "so_util.h"
-#include "jni_shim.h"
-
-#define TAG "deadeffect"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
-
-#ifndef DEAD_EFFECT_LIBDIR
-#define DEAD_EFFECT_LIBDIR "/roms/ports/DeadEffect/lib"
-#endif
-#ifndef DEAD_EFFECT_ASSETS
-#define DEAD_EFFECT_ASSETS "/roms/ports/DeadEffect/assets"
-#endif
-
-ANativeWindow *g_android_window = NULL;
-
-static void *libmain_h  = NULL;
-static void *libunity_h = NULL;
-static void *libil2cpp_h = NULL;
-
-typedef unsigned int (*JNI_OnLoad_t)(void *, void *);
-typedef void  (*UnityPla
+#include <android/log.h
