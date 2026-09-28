@@ -1,9 +1,10 @@
-name: Build DE Port (ATL + libjnivm + mcpelauncher-linker)
+name: Build DE Port (Chrono-Trigger-Loader + mcpelauncher-linker)
 
 on:
   workflow_dispatch:
   push:
     paths:
+      - 'src/**'
       - 'configs/**'
       - 'build.sh'
       - 'start.sh'
