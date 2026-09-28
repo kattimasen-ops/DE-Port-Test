@@ -50,6 +50,24 @@ static struct {
 } g_sym_cache[SYM_CACHE_SIZE];
 static int g_sym_cache_next = 0;
 
+/* Heap-Konsistenzpruefung auf Top-Chunk-Ebene.
+ * Die 128-KB-Allokation kommt aus dem Top-Chunk und zwingt glibc,
+ * die Metadaten zu validieren. Kleine Allokationen nutzen tcache
+ * und wuerden eine Top-Chunk-Korruption nicht bemerken. */
+static int heap_sane_check(const char *when) {
+    void *a = malloc(16);
+    if (!a) { LOGE("  Heap-Check(%s): malloc(16) fehlgeschlagen", when); return 0; }
+    memset(a, 0xAA, 16);
+    free(a);
+
+    void *big = malloc(128 * 1024);
+    if (!big) { LOGE("  Heap-Check(%s): malloc(128K) fehlgeschlagen", when); return 0; }
+    memset(big, 0xCC, 128 * 1024);
+    free(big);
+
+    return 1;
+}
+
 static void *resolve_symbol_full(const char *name) {
     for (int i = 0; i < g_nmods; i++) {
         so_module *m = &g_modules[i];
@@ -106,7 +124,6 @@ static void relocate(so_module *m, Elf64_Rela *rel, size_t count) {
         uint32_t type = ELF64_R_TYPE(r->r_info);
         uint32_t sym  = ELF64_R_SYM(r->r_info);
 
-        /* TLSDESC braucht 16 Byte, andere 8 Byte. Konservativ pruefen. */
         if (r->r_offset + 16 > m->size) {
             LOGE("Ungueltiger Reloc-Offset 0x%lx — ueberspringe",
                  (unsigned long)r->r_offset);
@@ -138,9 +155,6 @@ static void relocate(so_module *m, Elf64_Rela *rel, size_t count) {
                 break;
             }
 
-            /* R_AARCH64_COPY (1024): Kopiert Bytes eines definierten
-             * Datensymbols aus einem Shared Object in den .bss-Slot
-             * der ladenden Bibliothek. */
             case R_AARCH64_COPY: {
                 if (sym >= m->symcount) { *ptr = 0; break; }
                 Elf64_Sym *s = &m->symtab[sym];
@@ -160,8 +174,6 @@ static void relocate(so_module *m, Elf64_Rela *rel, size_t count) {
                 break;
             }
 
-            /* R_AARCH64_TLSDESC (1031): 16-Byte-Descriptor.
-             * Ohne echte TLS-Laufzeit setzen wir ihn auf {0,0}. */
             case R_AARCH64_TLSDESC: {
                 static int warned = 0;
                 if (!warned) {
@@ -345,13 +357,12 @@ void *so_load(const char *path) {
                  i, m->init_count, fn, (unsigned long)off,
                  find_nearest_symbol(m, off));
 
-            void *ht = malloc(32);
-            if (!ht) {
+            /* Top-Chunk-Heap-Check vor jedem Aufruf */
+            if (!heap_sane_check("vor init_array-Aufruf")) {
                 LOGE("  !!! Heap BROKEN vor init_array[%zu/%zu] !!!",
                      i, m->init_count);
                 break;
             }
-            free(ht);
 
             if (fn) fn();
         }
