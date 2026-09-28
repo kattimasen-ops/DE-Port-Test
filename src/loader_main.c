@@ -113,6 +113,9 @@ static void try_call_onload(const char *libname, void *handle) {
     LOGI("[%s] JNI_OnLoad -> 0x%x", libname, ver);
 }
 
+/* libc++_shared.so: Unity-Libs sind statisch gelinkt, externe libc++
+ * ist nicht erforderlich. Wir versuchen sie trotzdem zu laden, falls
+ * vorhanden — aber eine fehlende libc++ ist KEIN Fehler. */
 static void preload_libcxx(void) {
     char p[512];
     void *h = NULL;
@@ -124,9 +127,7 @@ static void preload_libcxx(void) {
     h = dlopen("libc++_shared.so", RTLD_NOW | RTLD_GLOBAL);
     if (h) { LOGI("libc++_shared.so vorgeladen (via Name): %p", h); return; }
 
-    LOGE("[WARN] libc++_shared.so nicht gefunden: %s", dlerror());
-    LOGE("[WARN] lege sie unter %s/libc++_shared.so oder setze LD_LIBRARY_PATH",
-         DEAD_EFFECT_LIBDIR);
+    LOGI("[INFO] externe libc++_shared.so nicht geladen — Unity-Libs sind statisch gelinkt, nicht benoetigt");
 }
 
 static int load_module_chain(void) {
