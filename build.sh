@@ -178,6 +178,17 @@ for f in "$DE_MAIN" "$DE_UNITY" "$DE_IL2CPP"; do
     else log "  [WARN] $f fehlt"; fi
 done
 
+# --- libc++_shared.so NUR uebernehmen, wenn sie im Repo liegt ---
+# Wenn nicht: kein Problem, sie muss direkt auf dem Geraet unter
+# /roms/ports/DeadEffect/lib/libc++_shared.so vorhanden sein.
+if [ -f "$GITHUB_WS/libs/libc++_shared.so" ]; then
+    cp "$GITHUB_WS/libs/libc++_shared.so" "$WORK/de_libs/arm64-v8a/"
+    log "  libc++_shared.so: $(stat -c%s "$GITHUB_WS/libs/libc++_shared.so") bytes (aus libs/)"
+else
+    log "  [INFO] libc++_shared.so nicht im Repo — muss auf dem Geraet"
+    log "         unter /roms/ports/DeadEffect/lib/ vorhanden sein."
+fi
+
 # ------------------------------------------------------------
 # 5. JNI-Metadaten
 # ------------------------------------------------------------
@@ -275,8 +286,17 @@ else
 fi
 chmod +x port/DeadEffect/deadeffect-loader
 
+# Kopiert libmain/libunity/libil2cpp UND ggf. libc++_shared.so (falls im Repo)
 [ -d "$WORK/de_libs/arm64-v8a" ] && cp "$WORK"/de_libs/arm64-v8a/*.so port/DeadEffect/lib/ 2>/dev/null || true
 
+# Wenn eine DeadEffect.sh im Repo-Wurzelverzeichnis liegt, benutze sie.
+# Sonst Fallback-Inline-Version.
+if [ -f "$GITHUB_WS/DeadEffect.sh" ]; then
+    cp "$GITHUB_WS/DeadEffect.sh" port/DeadEffect/DeadEffect.sh
+    chmod +x port/DeadEffect/DeadEffect.sh
+    log "[OK] DeadEffect.sh aus Repo uebernommen"
+else
+    log "[INFO] Keine DeadEffect.sh im Repo — Fallback wird benutzt"
 cat > port/DeadEffect/DeadEffect.sh <<'SHEOF'
 #!/bin/bash
 GAMEDIR="/roms/ports/DeadEffect"
@@ -307,6 +327,7 @@ STATUS=$?
 exit $STATUS
 SHEOF
 chmod +x port/DeadEffect/DeadEffect.sh
+fi
 
 cat > port/DeadEffect/de_wrapper.gptk <<'GPTK'
 back = esc
