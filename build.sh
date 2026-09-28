@@ -4,12 +4,10 @@
 # Alle Quellen liegen in src/ im Repo — kein Heredoc mehr.
 # ============================================================
 
-# GitHub ruft run:-Steps mit `bash -e` auf. Abschalten!
 set +euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
-# WORK fest im Workspace, NICHT über Env überschreibbar
 GITHUB_WS="${GITHUB_WORKSPACE:-$PWD}"
 OUT="$GITHUB_WS"
 WORK="$GITHUB_WS/work"
@@ -178,12 +176,47 @@ for f in "$DE_MAIN" "$DE_UNITY" "$DE_IL2CPP"; do
     else log "  [WARN] $f fehlt"; fi
 done
 
-if [ -f "$GITHUB_WS/libs/libc++_shared.so" ]; then
-    cp "$GITHUB_WS/libs/libc++_shared.so" "$WORK/de_libs/arm64-v8a/"
-    log "  libc++_shared.so: $(stat -c%s "$GITHUB_WS/libs/libc++_shared.so") bytes (aus libs/)"
+# ---- libc++_shared.so beschaffen und fuer glibc patchen --------------------
+LIBCXX_SRC=""
+if [ -f "$WORK/de_libs/arm64-v8a/libc++_shared.so" ]; then
+    LIBCXX_SRC="$WORK/de_libs/arm64-v8a/libc++_shared.so"
+    log "  libc++_shared.so: gefunden im ZIP"
+elif [ -f "$GITHUB_WS/libs/libc++_shared.so" ]; then
+    LIBCXX_SRC="$GITHUB_WS/libs/libc++_shared.so"
+    log "  libc++_shared.so: gefunden in libs/ im Repo"
 else
-    log "  [INFO] libc++_shared.so nicht im Repo — muss auf dem Geraet"
-    log "         unter /roms/ports/DeadEffect/lib/ vorhanden sein."
+    log "  [INFO] libc++_shared.so nicht im ZIP und nicht in libs/."
+    log "         Auf dem Geraet wird sie von fix_libcxx.sh gepatcht."
+fi
+
+if [ -n "$LIBCXX_SRC" ]; then
+    cp "$LIBCXX_SRC" "$WORK/de_libs/arm64-v8a/libc++_shared.so"
+    LIBCXX_DST="$WORK/de_libs/arm64-v8a/libc++_shared.so"
+
+    if ! command -v patchelf >/dev/null 2>&1; then
+        log "  [WARN] patchelf fehlt — ueberspringe Patch"
+    else
+        HAS_ANDROID=0
+        for need in $(readelf -d "$LIBCXX_DST" 2>/dev/null | grep NEEDED | awk '{print $NF}' | tr -d '[]'); do
+            case "$need" in
+                libc.so|libdl.so|libm.so|libstdc++.so|liblog.so) HAS_ANDROID=1 ;;
+            esac
+        done
+
+        if [ "$HAS_ANDROID" = "1" ]; then
+            log "  [PATCH] libc++ hat Android-Namen — patche fuer glibc"
+            patchelf --replace-needed libc.so      libc.so.6      "$LIBCXX_DST" 2>&1 | tee -a "$BUILD_LOG" || true
+            patchelf --replace-needed libdl.so     libdl.so.2     "$LIBCXX_DST" 2>&1 | tee -a "$BUILD_LOG" || true
+            patchelf --replace-needed libm.so      libm.so.6      "$LIBCXX_DST" 2>&1 | tee -a "$BUILD_LOG" || true
+            patchelf --replace-needed libstdc++.so libstdc++.so.6 "$LIBCXX_DST" 2>&1 | tee -a "$BUILD_LOG" || true
+            patchelf --replace-needed liblog.so    libc.so.6      "$LIBCXX_DST" 2>&1 | tee -a "$BUILD_LOG" || true
+
+            log "  [PATCH] neue NEEDED-Eintraege:"
+            readelf -d "$LIBCXX_DST" 2>/dev/null | grep NEEDED | tee -a "$BUILD_LOG" || true
+        else
+            log "  libc++ hat bereits glibc-Namen — kein Patch noetig"
+        fi
+    fi
 fi
 
 # ------------------------------------------------------------
@@ -260,9 +293,6 @@ else
     ) | tee -a "$BUILD_LOG"
 fi
 
-# ------------------------------------------------------------
-# Loader-Pruefung: Groesse UND Pflicht-Symbole
-# ------------------------------------------------------------
 LOADER_OK=0
 if [ -f deadeffect-loader ]; then
     SZ=$(stat -c%s deadeffect-loader)
@@ -278,7 +308,7 @@ if [ -f deadeffect-loader ]; then
         log "[FEHLER] Loader nur $SZ Bytes gross (vermutlich Fallback)"
         LOADER_OK=0
     elif [ "$SYM_OK" != "1" ]; then
-        log "[FEHLER] Loader fehlen Pflicht-Symbole — wird nicht uebernommen"
+        log "[FEHLER] Loader fehlen Pflicht-Symbole"
         LOADER_OK=0
     else
         LOADER_OK=1
@@ -348,12 +378,21 @@ if command -v gptokeyb >/dev/null 2>&1; then
     gptokeyb -k "deadeffect" -c "$GAMEDIR/de_wrapper.gptk" & GPID=$!
     trap "kill $GPID 2>/dev/null" EXIT
 fi
+[ -f "$GAMEDIR/fix_libcxx.sh" ] && [ -f "$GAMEDIR/lib/libc++_shared.so" ] && \
+    bash "$GAMEDIR/fix_libcxx.sh" "$GAMEDIR/lib/libc++_shared.so" "$GAMEDIR/log.txt" || true
 stdbuf -oL -eL ./deadeffect-loader "$GAMEDIR" 2>&1 | tee "$GAMEDIR/log.txt"
 STATUS=$?
 [ -n "${GPID:-}" ] && kill "$GPID" 2>/dev/null || true
 exit $STATUS
 SHEOF
 chmod +x port/DeadEffect/DeadEffect.sh
+fi
+
+# NEU: fix_libcxx.sh ins Port-Paket
+if [ -f "$GITHUB_WS/fix_libcxx.sh" ]; then
+    cp "$GITHUB_WS/fix_libcxx.sh" port/DeadEffect/fix_libcxx.sh
+    chmod +x port/DeadEffect/fix_libcxx.sh
+    log "[OK] fix_libcxx.sh uebernommen"
 fi
 
 cat > port/DeadEffect/de_wrapper.gptk <<'GPTK'
