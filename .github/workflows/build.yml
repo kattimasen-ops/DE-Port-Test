@@ -1,4 +1,4 @@
-name: Build DE Port (Bogodroid / libjnivm / droidports)
+name: Build DE Port (ATL + libjnivm + mcpelauncher-linker)
 
 on:
   workflow_dispatch:
