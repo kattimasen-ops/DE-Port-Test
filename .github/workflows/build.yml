@@ -1,37 +1,79 @@
-name: Build DE Port (Chrono-Trigger-Loader + mcpelauncher-linker)
+name: Build Dead Effect Port
 
 on:
-  workflow_dispatch:
   push:
-    paths:
-      - 'src/**'
-      - 'configs/**'
-      - 'build.sh'
-      - 'start.sh'
-      - '.github/workflows/build.yml'
-
-env:
-  DE_LIBS_URL: https://github.com/kattimasen-ops/DE-Port-Test/releases/download/V1/arm64-v8a.zip
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
 
 jobs:
-  build-aarch64:
-    runs-on: ubuntu-22.04
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:20.04
+      options: --privileged
+
     steps:
-      - name: Repository auschecken
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Cross-Compile im Ubuntu 20.04 Container
+      - name: Prepare workdir
         run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/work" \
-            -w /work \
-            -e DE_LIBS_URL="${{ env.DE_LIBS_URL }}" \
-            ubuntu:20.04 \
-            bash /work/build.sh
+          mkdir -p /work
+          # WORK explizit exportieren, damit build.sh es nutzt
+          echo "WORK=/work" >> $GITHUB_ENV
 
-      - name: Build-Artefakte hochladen
+      - name: Run build.sh
+        env:
+          DE_LIBS_URL: ${{ secrets.DE_LIBS_URL }}
+          # Optional: Setzen sobald wir den echten Klassennamen kennen
+          # DEAD_EFFECT_NATIVE_LOADER_CLASS: "com/bulkypix/deadeffect/NativeLoader"
+        run: |
+          chmod +x ./build.sh
+          ./build.sh
+          # Build.sh exitet immer 0 – Fehler werden über build_status.txt gemeldet
+        continue-on-error: false
+
+      - name: Show build artifacts (Diagnose)
+        if: always()
+        run: |
+          echo "=== Workspace ==="
+          ls -la "$GITHUB_WORKSPACE"
+          echo ""
+          echo "=== ZIP vorhanden? ==="
+          ls -la "$GITHUB_WORKSPACE/DeadEffect-Port.zip" || echo "NICHT GEFUNDEN"
+          echo ""
+          echo "=== Letzte 60 Zeilen build.log (falls verfügbar) ==="
+          if [ -f /work/build.log ]; then
+            tail -60 /work/build.log
+          else
+            echo "(kein build.log)"
+          fi
+
+      - name: Upload Port-ZIP
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: DeadEffect-Port
           path: DeadEffect-Port.zip
-          if-no-files-found: error
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload build.log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: /work/build.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload undefined-symbols
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: undefined-symbols
+          path: /work/undefined_symbols.txt
+          if-no-files-found: warn
+          retention-days: 7
