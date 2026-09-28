@@ -1,15 +1,10 @@
 #!/bin/bash
 # ============================================================
 # Dead Effect Port - Build-Skript
-# Alle Quellen liegen in src/ im Repo — kein Heredoc mehr.
 # ============================================================
-
-# GitHub ruft run:-Steps mit `bash -e` auf. Abschalten!
 set +euo pipefail
-
 export DEBIAN_FRONTEND=noninteractive
 
-# WORK fest im Workspace, NICHT über Env überschreibbar
 GITHUB_WS="${GITHUB_WORKSPACE:-$PWD}"
 OUT="$GITHUB_WS"
 WORK="$GITHUB_WS/work"
@@ -33,11 +28,8 @@ log "==> PWD              = $PWD"
 log "==> Shell-Optionen   = $-"
 
 # ------------------------------------------------------------
-# 1. apt
-# ------------------------------------------------------------
 log "===== STEP 1: apt ====="
 dpkg --add-architecture arm64 2>/dev/null || true
-
 cat > /etc/apt/sources.list.d/amd64.list <<'EOF'
 deb [arch=amd64] http://archive.ubuntu.com/ubuntu focal main restricted universe multiverse
 deb [arch=amd64] http://archive.ubuntu.com/ubuntu focal-updates main restricted universe multiverse
@@ -49,11 +41,8 @@ deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-updates main restric
 deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-security main restricted universe multiverse
 EOF
 rm -f /etc/apt/sources.list
-
 apt-get update 2>&1 | tee -a "$BUILD_LOG" || log "[WARN] apt update"
 
-# ------------------------------------------------------------
-# 2. Cross-Toolchain
 # ------------------------------------------------------------
 log "===== STEP 2: Cross-Toolchain ====="
 apt-get install -y --no-install-recommends \
@@ -69,11 +58,8 @@ apt-get install -y --no-install-recommends \
 aarch64-linux-gnu-gcc --version 2>&1 | head -1 | tee -a "$BUILD_LOG"
 
 # ------------------------------------------------------------
-# 3. Compat-Header
-# ------------------------------------------------------------
 log "===== STEP 3: Compat-Header ====="
 mkdir -p /usr/include/android
-
 cat > /usr/include/android/log.h <<'EOF'
 #ifndef COMPAT_ANDROID_LOG_H
 #define COMPAT_ANDROID_LOG_H
@@ -88,7 +74,6 @@ int __android_log_vprint(int prio, const char *tag, const char *fmt, va_list ap)
 int __android_log_write(int prio, const char *tag, const char *text);
 #endif
 EOF
-
 cat > /usr/include/android/native_window.h <<'EOF'
 #ifndef COMPAT_ANATIVE_WINDOW_H
 #define COMPAT_ANATIVE_WINDOW_H
@@ -103,7 +88,6 @@ int32_t ANativeWindow_getFormat(ANativeWindow *w);
 int32_t ANativeWindow_setBuffersGeometry(ANativeWindow *w, int32_t width, int32_t height, int32_t format);
 #endif
 EOF
-
 cat > /usr/include/android/looper.h <<'EOF'
 #ifndef COMPAT_ALOOPER_H
 #define COMPAT_ALOOPER_H
@@ -122,7 +106,6 @@ int ALooper_addFd(ALooper *l, int fd, int ident, int events, ALooper_callbackFun
 int ALooper_removeFd(ALooper *l, int fd);
 #endif
 EOF
-
 cat > /usr/include/android/sensor.h <<'EOF'
 #ifndef COMPAT_ASENSOR_H
 #define COMPAT_ASENSOR_H
@@ -155,11 +138,8 @@ const char *ASensor_getVendor(ASensor const *s);
 float ASensor_getResolution(ASensor const *s);
 #endif
 EOF
-
 log "[OK] Compat-Header geschrieben"
 
-# ------------------------------------------------------------
-# 4. DE .so laden
 # ------------------------------------------------------------
 log "===== STEP 4: Dead Effect .so ====="
 mkdir -p "$WORK/de_libs"
@@ -169,7 +149,6 @@ if [ -n "${DE_LIBS_URL:-}" ]; then
 else
     log "[WARN] DE_LIBS_URL nicht gesetzt"
 fi
-
 DE_MAIN="$WORK/de_libs/arm64-v8a/libmain.so"
 DE_UNITY="$WORK/de_libs/arm64-v8a/libunity.so"
 DE_IL2CPP="$WORK/de_libs/arm64-v8a/libil2cpp.so"
@@ -177,7 +156,6 @@ for f in "$DE_MAIN" "$DE_UNITY" "$DE_IL2CPP"; do
     if [ -f "$f" ]; then log "  $(basename "$f"): $(stat -c%s "$f") bytes"
     else log "  [WARN] $f fehlt"; fi
 done
-
 if [ -f "$GITHUB_WS/libs/libc++_shared.so" ]; then
     cp "$GITHUB_WS/libs/libc++_shared.so" "$WORK/de_libs/arm64-v8a/"
     log "  libc++_shared.so: $(stat -c%s "$GITHUB_WS/libs/libc++_shared.so") bytes (aus libs/)"
@@ -186,8 +164,6 @@ else
     log "         unter /roms/ports/DeadEffect/lib/ vorhanden sein."
 fi
 
-# ------------------------------------------------------------
-# 5. JNI-Metadaten
 # ------------------------------------------------------------
 log "===== STEP 5: JNI-Meta ====="
 if [ -f "$DE_MAIN" ]; then
@@ -200,24 +176,18 @@ log "--- NativeLoader-Hints ---"
 cat "$JNI_META/nativeloader_hints.txt" 2>/dev/null | tee -a "$BUILD_LOG" || true
 
 # ------------------------------------------------------------
-# 6. Kompilieren
-# ------------------------------------------------------------
 log "===== STEP 6: Kompilieren ====="
-
 SRC_IN="$GITHUB_WS/src"
 if [ ! -d "$SRC_IN" ]; then
     log "[FEHLER] $SRC_IN fehlt!"
     exit 0
 fi
-
 BUILD_SRC="$WORK/build_src"
 rm -rf "$BUILD_SRC"
 mkdir -p "$BUILD_SRC"
 cp "$SRC_IN"/*.c "$SRC_IN"/*.h "$BUILD_SRC/" 2>/dev/null || true
-
 log "Quellen:"
 ls -la "$BUILD_SRC" 2>&1 | tee -a "$BUILD_LOG"
-
 cd "$BUILD_SRC"
 
 CFLAGS="-D_GNU_SOURCE -O2 -fPIC -fno-omit-frame-pointer -rdynamic -Wl,-E"
@@ -229,7 +199,6 @@ CFLAGS="$CFLAGS -Wno-deprecated-declarations -Wno-error -Wno-format"
 CFLAGS="$CFLAGS -Wno-unused-variable -Wno-unused-function -Wno-unused-parameter"
 CFLAGS="$CFLAGS -I. -I/usr/include -I/usr/aarch64-linux-gnu/include"
 CFLAGS="$CFLAGS -I/usr/include/SDL2 -I/usr/aarch64-linux-gnu/include/SDL2"
-
 LDFLAGS="-L/usr/aarch64-linux-gnu/lib -lSDL2 -lGLESv2 -lEGL -ldl -lm -lpthread -lstdc++ -lgcc_s -rdynamic -Wl,-E"
 
 SRCS=$(ls *.c 2>/dev/null | grep -v '^main\.c$' || true)
@@ -240,9 +209,7 @@ COMPILE_FAILED=0
 for src in $SRCS; do
     OBJ="/tmp/$(basename "$src" .c).o"
     log "--- $src ---"
-    (
-        aarch64-linux-gnu-gcc $CFLAGS -c "$src" -o "$OBJ" 2>&1 | head -60
-    ) | tee -a "$BUILD_LOG"
+    ( aarch64-linux-gnu-gcc $CFLAGS -c "$src" -o "$OBJ" 2>&1 | head -60 ) | tee -a "$BUILD_LOG"
     if [ -f "$OBJ" ]; then
         OBJS="$OBJS $OBJ"
     else
@@ -253,25 +220,20 @@ done
 
 if [ "$COMPILE_FAILED" = "1" ]; then
     log "[FEHLER] Mindestens eine Quelldatei fehlgeschlagen — Linken uebersprungen."
-    log "[FEHLER] Das verhindert einen unvollstaendigen Loader."
 else
     log "==> Linke Loader"
-    (
-        aarch64-linux-gnu-gcc -o deadeffect-loader $OBJS $LDFLAGS 2>&1 | head -100
-    ) | tee -a "$BUILD_LOG"
+    ( aarch64-linux-gnu-gcc -o deadeffect-loader $OBJS $LDFLAGS 2>&1 | head -100 ) | tee -a "$BUILD_LOG"
 fi
 
 LOADER_OK=0
 if [ -f deadeffect-loader ]; then
     SZ=$(stat -c%s deadeffect-loader)
     if [ "$SZ" -lt 100000 ]; then
-        log "[WARN] Loader nur $SZ Bytes gross — vermutlich unvollstaendig"
-        LOADER_OK=0
+        log "[WARN] Loader nur $SZ Bytes — vermutlich unvollstaendig (min. 100 KB erwartet)"
     else
         LOADER_OK=1
         log "[OK] Loader gebaut ($SZ Bytes)"
         file deadeffect-loader | tee -a "$BUILD_LOG"
-        ls -la deadeffect-loader | tee -a "$BUILD_LOG"
         readelf -d deadeffect-loader 2>/dev/null | grep NEEDED | tee -a "$BUILD_LOG" || true
     fi
 else
@@ -284,8 +246,6 @@ fi
     [ -f deadeffect-loader ] && nm -D --undefined-only deadeffect-loader 2>/dev/null | head -200
 } > "$SYMS_FILE" 2>&1
 
-# ------------------------------------------------------------
-# 7. Port-Paket
 # ------------------------------------------------------------
 log "===== STEP 7: Port-Paket ====="
 cd "$WORK"
