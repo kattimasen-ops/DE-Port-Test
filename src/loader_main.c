@@ -64,25 +64,20 @@ static EGLDisplay    egl_dpy = EGL_NO_DISPLAY;
 static EGLSurface    egl_surf = EGL_NO_SURFACE;
 static EGLContext    egl_ctx = EGL_NO_CONTEXT;
 
-/* Heap-Konsistenzpruefung: allokiert und gibt drei verschiedene
- * Groessen frei. Wenn der Heap beschädigt ist, crasht mindestens
- * eine davon mit der glibc-Assertion. Wir pruefen das, um genau
- * zu wissen, nach welcher Bibliothek der Heap kaputt ist. */
+/* Heap-Konsistenzpruefung auf Top-Chunk-Ebene.
+ * Kleine Allokationen (16/256 B) landen im tcache und sehen
+ * Top-Chunk-Korruption nicht. Eine 128-KB-Allokation kommt aus
+ * dem Top-Chunk und zwingt glibc, die Metadaten zu validieren. */
 static int heap_is_sane(const char *when) {
     void *a = malloc(16);
     if (!a) { LOGE("  Heap-Check(%s): malloc(16) fehlgeschlagen", when); return 0; }
     memset(a, 0xAA, 16);
     free(a);
 
-    void *b = malloc(256);
-    if (!b) { LOGE("  Heap-Check(%s): malloc(256) fehlgeschlagen", when); return 0; }
-    memset(b, 0xBB, 256);
-    free(b);
-
-    void *c = malloc(4096);
-    if (!c) { LOGE("  Heap-Check(%s): malloc(4096) fehlgeschlagen", when); return 0; }
-    memset(c, 0xCC, 4096);
-    free(c);
+    void *big = malloc(128 * 1024);
+    if (!big) { LOGE("  Heap-Check(%s): malloc(128K) fehlgeschlagen", when); return 0; }
+    memset(big, 0xCC, 128 * 1024);
+    free(big);
 
     LOGI("  Heap OK (%s)", when);
     return 1;
