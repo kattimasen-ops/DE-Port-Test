@@ -101,6 +101,15 @@ static void relocate(so_module *m, Elf64_Rela *rel, size_t count) {
         Elf64_Rela *r = &rel[i];
         uint32_t type = ELF64_R_TYPE(r->r_info);
         uint32_t sym  = ELF64_R_SYM(r->r_info);
+
+        /* Sicherheitscheck: Offset muss innerhalb des geladenen Bereichs
+         * liegen. Verhindert Heap-Corruption durch defekte Relocs. */
+        if (r->r_offset + sizeof(uint64_t) > m->size) {
+            LOGE("Ungueltiger Reloc-Offset 0x%lx (span=%zu) — ueberspringe",
+                 (unsigned long)r->r_offset, m->size);
+            continue;
+        }
+
         uint64_t *ptr = (uint64_t *)((uintptr_t)m->base + r->r_offset);
         switch (type) {
             case R_AARCH64_NONE: break;
