@@ -169,7 +169,6 @@ void *so_load(const char *path) {
     if (rela_ent) m->relacount = rela_sz / rela_ent;
     m->jmprelcount = jmprel_sz / sizeof(Elf64_Rela);
 
-    /* Symbol count: prefer SysV hash, else GNU hash, else 65536 (upper bound). */
     if (sysv_hash) {
         m->symcount = sysv_hash[1];
     } else if (gnu_hash) {
@@ -227,3 +226,26 @@ void *so_find_addr(void *handle, const char *name) {
 
 void so_flush_caches(void) { /* no-op on Linux */ }
 void so_set_imports(void)  { /* no-op */ }
+
+/* Diagnose: zeigt interessante Symbole (JNI_OnLoad, UnityPlayer, il2cpp_*, NativeLoader) */
+void so_dump_symbols(void *handle) {
+    so_module *m = handle;
+    if (!m || !m->symtab || !m->strtab) return;
+    LOGI("--- Symbols in module @ %p (base=%p, count=%zu) ---",
+         m, m->base, m->symcount);
+    int shown = 0;
+    for (size_t i = 0; i < m->symcount; i++) {
+        Elf64_Sym *s = &m->symtab[i];
+        if (s->st_shndx == SHN_UNDEF) continue;
+        if (!s->st_name) continue;
+        const char *name = m->strtab + s->st_name;
+        if (strstr(name, "JNI_OnLoad") ||
+            strstr(name, "UnityPlayer") ||
+            strstr(name, "NativeLoader") ||
+            strstr(name, "il2cpp_")) {
+            LOGI("  %s", name);
+            shown++;
+        }
+    }
+    LOGI("--- %d interessante Symbole ---", shown);
+}
