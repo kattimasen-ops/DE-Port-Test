@@ -23,7 +23,7 @@
 #endif
 
 ANativeWindow *g_android_window = NULL;
-void *g_libmain_handle = NULL;
+void *g_libmain_handle  = NULL;
 void *g_libunity_handle = NULL;
 
 /* JNI_OnLoad signature: jint JNI_OnLoad(JavaVM *vm, void *reserved) */
@@ -42,9 +42,6 @@ static SDL_GLContext sdl_ctx = NULL;
 static EGLDisplay    egl_dpy = EGL_NO_DISPLAY;
 static EGLSurface    egl_surf = EGL_NO_SURFACE;
 static EGLContext    egl_ctx = EGL_NO_CONTEXT;
-
-/* Dump alle exportierten dynamischen Symbole eines Moduls */
-extern void so_dump_symbols(void *handle);
 
 static int video_init(void) {
     if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) < 0) {
@@ -96,7 +93,6 @@ static int load_module_chain(void) {
 
     /* ------------------------------------------------------------------
      * 2. JNI_OnLoad von libunity rufen, falls vorhanden
-     *    (löst RegisterNatives-Init in Unity aus)
      * ------------------------------------------------------------------ */
     unity_onload = (JNI_OnLoad_t) so_find_addr(g_libunity_handle, "JNI_OnLoad");
     if (unity_onload) {
@@ -104,7 +100,7 @@ static int load_module_chain(void) {
         int jni_ver = unity_onload(jni_get_env(), NULL);
         LOGI("JNI_OnLoad -> version 0x%x", jni_ver);
     } else {
-        LOGI("libunity exportiert kein JNI_OnLoad (ok, machen wir manuell)");
+        LOGI("libunity exportiert kein JNI_OnLoad (ok)");
     }
 
     /* ------------------------------------------------------------------
@@ -127,7 +123,6 @@ static int load_module_chain(void) {
     if (!libil2cpp_h) { LOGE("libil2cpp.so laden fehlgeschlagen"); return -1; }
     LOGI("libil2cpp.so geladen: %p", libil2cpp_h);
 
-    /* Falls libil2cpp JNI_OnLoad hat, rufen wir es auch */
     JNI_OnLoad_t il2cpp_onload = (JNI_OnLoad_t) so_find_addr(libil2cpp_h, "JNI_OnLoad");
     if (il2cpp_onload) {
         LOGI("Rufe JNI_OnLoad(libil2cpp) @ %p", il2cpp_onload);
@@ -136,9 +131,7 @@ static int load_module_chain(void) {
     }
 
     /* ------------------------------------------------------------------
-     * 5. libmain.so optional laden (für init_array / Diagnose)
-     *    NICHT NativeLoader.load aufrufen — die Unity-Laufzeit ist
-     *    durch libunity.so bereits initialisiert.
+     * 5. libmain.so optional (nur Diagnose)
      * ------------------------------------------------------------------ */
     snprintf(path, sizeof(path), "%s/libmain.so", DEAD_EFFECT_LIBDIR);
     LOGI("Lade %s (optional)", path);
@@ -151,8 +144,7 @@ static int load_module_chain(void) {
     }
 
     /* ------------------------------------------------------------------
-     * 6. UnityPlayer.initJni aufrufen (JETZT, wo libunity + libil2cpp
-     *    beide im Speicher sind)
+     * 6. UnityPlayer.initJni aufrufen
      * ------------------------------------------------------------------ */
     if (unity_init_jni) {
         void *env      = jni_get_env();
