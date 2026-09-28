@@ -175,9 +175,8 @@ for f in "$DE_MAIN" "$DE_UNITY" "$DE_IL2CPP"; do
     else log "  [WARN] $f fehlt"; fi
 done
 
-# ---- libc++_shared.so (wird fuer den Loader nicht mehr gebraucht, aber
-#      fuer den unwahrscheinlichen Fall, dass eine .so sie doch anfordert,
-#      bleibt sie im ZIP. Patch fuer glibc wie bisher.)
+# ---- libc++_shared.so (nicht mehr benoetigt, aber der Vollstaendigkeit
+#      halber ins ZIP legen, falls eine externe .so sie doch anfordert) ----
 LIBCXX_SRC=""
 for cand in \
     "$GITHUB_WS/libc++_shared.so" \
@@ -193,14 +192,9 @@ for cand in \
     fi
 done
 
-if [ -z "$LIBCXX_SRC" ]; then
-    log "  [INFO] libc++_shared.so nicht gefunden — wird nicht ins ZIP gelegt."
-fi
-
 if [ -n "$LIBCXX_SRC" ]; then
     cp "$LIBCXX_SRC" "$WORK/de_libs/arm64-v8a/libc++_shared.so"
     LIBCXX_DST="$WORK/de_libs/arm64-v8a/libc++_shared.so"
-
     if command -v patchelf >/dev/null 2>&1; then
         HAS_ANDROID=0
         for need in $(readelf -d "$LIBCXX_DST" 2>/dev/null | grep NEEDED | awk '{print $NF}' | tr -d '[]'); do
@@ -220,40 +214,29 @@ if [ -n "$LIBCXX_SRC" ]; then
 fi
 
 # ------------------------------------------------------------
-# 4b. Diagnose: libil2cpp init_array[0] @ 0x80160c
+# 4b. Relocation-Analyse fuer libil2cpp und libunity
 # ------------------------------------------------------------
-log "===== STEP 4b: Disassembly libil2cpp init_array[0] ====="
+log "===== STEP 4b: Relocation-Analyse ====="
 
+for lib in "$DE_IL2CPP" "$DE_UNITY"; do
+    if [ ! -f "$lib" ]; then continue; fi
+    log "--- $(basename "$lib"): Relocation-Typen-Haeufigkeit ---"
+    aarch64-linux-gnu-readelf -r "$lib" 2>/dev/null | \
+        awk '{print $3}' | grep -E '^R_AARCH64' | sort | uniq -c | sort -rn | \
+        tee -a "$BUILD_LOG" || log "  (readelf fehlgeschlagen)"
+
+    log "--- $(basename "$lib"): COPY/TLSDESC im Detail ---"
+    aarch64-linux-gnu-readelf -r "$lib" 2>/dev/null | \
+        grep -E 'R_AARCH64_(COPY|TLSDESC)' | head -20 | tee -a "$BUILD_LOG" || \
+        log "  (keine COPY/TLSDESC gefunden)"
+done
+
+log "--- Disassembly libil2cpp @ 0x8015b0 - 0x8016a0 ---"
 if [ -f "$DE_IL2CPP" ] && command -v aarch64-linux-gnu-objdump >/dev/null 2>&1; then
-    log "--- objdump 0x801580 - 0x8016a0 ---"
     aarch64-linux-gnu-objdump -d \
-        --start-address=0x801580 \
+        --start-address=0x8015b0 \
         --stop-address=0x8016a0 \
         "$DE_IL2CPP" 2>&1 | tee -a "$BUILD_LOG"
-
-    log ""
-    log "--- TLS-Check: Aufrufe an __tls_get_addr ---"
-    aarch64-linux-gnu-objdump -d \
-        --start-address=0x801580 \
-        --stop-address=0x8016a0 \
-        "$DE_IL2CPP" 2>/dev/null | grep -iE 'tls_get|tpidr_el0|mrs.*tpidr' | tee -a "$BUILD_LOG" || log "  (keine TLS-Instruktionen im Bereich)"
-
-    log ""
-    log "--- DT_FLAGS / TEXTREL in libil2cpp ---"
-    readelf -d "$DE_IL2CPP" 2>/dev/null | grep -iE 'flags|textrel|bind_now' | tee -a "$BUILD_LOG" || log "  (keine)"
-
-    log ""
-    log "--- Dynamische Symbole (nur globals) ---"
-    readelf -sW --dyn-syms "$DE_IL2CPP" 2>/dev/null | awk '$4=="FUNC" && $5=="GLOBAL"' | head -20 | tee -a "$BUILD_LOG" || true
-
-    log ""
-    log "--- Bereich um 0x80160c: benachbarte Strings ---"
-    strings -a -t x "$DE_IL2CPP" 2>/dev/null | \
-        awk '{ if (strtonum("0x" $1) >= 0x7f0000 && strtonum("0x" $1) <= 0x806000) print }' \
-        | head -30 | tee -a "$BUILD_LOG" 2>/dev/null || \
-    strings -a -t x "$DE_IL2CPP" 2>/dev/null | grep -E '^(7f|80)[0-9a-f]{4} ' | head -30 | tee -a "$BUILD_LOG" || true
-else
-    log "  [WARN] libil2cpp fehlt oder objdump nicht verfuegbar"
 fi
 
 log "===== STEP 4b fertig ====="
