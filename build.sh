@@ -236,28 +236,44 @@ SRCS=$(ls *.c 2>/dev/null | grep -v '^main\.c$' || true)
 log "Kompiliere: $SRCS"
 
 OBJS=""
+COMPILE_FAILED=0
 for src in $SRCS; do
     OBJ="/tmp/$(basename "$src" .c).o"
     log "--- $src ---"
     (
-        aarch64-linux-gnu-gcc $CFLAGS -c "$src" -o "$OBJ" 2>&1 | head -40
+        aarch64-linux-gnu-gcc $CFLAGS -c "$src" -o "$OBJ" 2>&1 | head -60
     ) | tee -a "$BUILD_LOG"
-    if [ -f "$OBJ" ]; then OBJS="$OBJS $OBJ"
-    else log "  [WARN] $src fehlgeschlagen"; fi
+    if [ -f "$OBJ" ]; then
+        OBJS="$OBJS $OBJ"
+    else
+        log "  [FEHLER] $src kompiliert nicht"
+        COMPILE_FAILED=1
+    fi
 done
 
-log "==> Linke Loader"
-(
-    aarch64-linux-gnu-gcc -o deadeffect-loader $OBJS $LDFLAGS 2>&1 | head -100
-) | tee -a "$BUILD_LOG"
+if [ "$COMPILE_FAILED" = "1" ]; then
+    log "[FEHLER] Mindestens eine Quelldatei fehlgeschlagen — Linken uebersprungen."
+    log "[FEHLER] Das verhindert einen unvollstaendigen Loader."
+else
+    log "==> Linke Loader"
+    (
+        aarch64-linux-gnu-gcc -o deadeffect-loader $OBJS $LDFLAGS 2>&1 | head -100
+    ) | tee -a "$BUILD_LOG"
+fi
 
 LOADER_OK=0
 if [ -f deadeffect-loader ]; then
-    LOADER_OK=1
-    log "[OK] Loader gebaut"
-    file deadeffect-loader | tee -a "$BUILD_LOG"
-    ls -la deadeffect-loader | tee -a "$BUILD_LOG"
-    readelf -d deadeffect-loader 2>/dev/null | grep NEEDED | tee -a "$BUILD_LOG" || true
+    SZ=$(stat -c%s deadeffect-loader)
+    if [ "$SZ" -lt 100000 ]; then
+        log "[WARN] Loader nur $SZ Bytes gross — vermutlich unvollstaendig"
+        LOADER_OK=0
+    else
+        LOADER_OK=1
+        log "[OK] Loader gebaut ($SZ Bytes)"
+        file deadeffect-loader | tee -a "$BUILD_LOG"
+        ls -la deadeffect-loader | tee -a "$BUILD_LOG"
+        readelf -d deadeffect-loader 2>/dev/null | grep NEEDED | tee -a "$BUILD_LOG" || true
+    fi
 else
     log "[FEHLER] Linken fehlgeschlagen"
 fi
@@ -276,10 +292,10 @@ cd "$WORK"
 rm -rf port
 mkdir -p port/DeadEffect/lib port/DeadEffect/assets
 
-if [ -f "$BUILD_SRC/deadeffect-loader" ]; then
+if [ -f "$BUILD_SRC/deadeffect-loader" ] && [ "$LOADER_OK" = "1" ]; then
     cp "$BUILD_SRC/deadeffect-loader" port/DeadEffect/
 else
-    printf '#!/bin/bash\necho "Loader nicht gelinkt"\nexit 1\n' > port/DeadEffect/deadeffect-loader
+    printf '#!/bin/bash\necho "Loader nicht erfolgreich gebaut"\nexit 1\n' > port/DeadEffect/deadeffect-loader
 fi
 chmod +x port/DeadEffect/deadeffect-loader
 
@@ -296,7 +312,6 @@ cat > port/DeadEffect/DeadEffect.sh <<'SHEOF'
 GAMEDIR="/roms/ports/DeadEffect"
 cd "$GAMEDIR"
 echo performance | sudo tee /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || true
-# WICHTIG: privates lib-Verzeichnis in den Suchpfad aufnehmen
 export LD_LIBRARY_PATH="$GAMEDIR/lib:$GAMEDIR:$LD_LIBRARY_PATH"
 export SDL_VIDEODRIVER=kmsdrm
 export SDL_AUDIODRIVER=alsa
