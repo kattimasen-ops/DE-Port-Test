@@ -1,10 +1,13 @@
+
 #!/bin/bash
 # ============================================================
 # Dead Effect Port - Build mit Chrono-Trigger-Loader-Architektur
 # GPU-Ziel: Mali-G31 (Bifrost)
 #
-# WICHTIG: Chrono-Quellcode stammt aus Cocos2d-x-Umgebung.
-# Wir muessen Android-NDK-Header und Cocos2d-Konstanten stubben.
+# WICHTIG:
+#   - main.c definiert einige CK_* Konstanten selbst (Enum).
+#   - Wir setzen NUR die fehlenden Konstanten, mit #ifndef-Guards.
+#   - android/log.h wird systemweit bereitgestellt.
 # ============================================================
 set -e
 
@@ -34,7 +37,7 @@ rm -f /etc/apt/sources.list
 apt-get update
 
 # ------------------------------------------------------------
-# 2. Cross-Toolchain + Bibliotheken
+# 2. Cross-Toolchain
 # ------------------------------------------------------------
 echo "==> Installiere Cross-Toolchain"
 apt-get install -y --no-install-recommends \
@@ -53,37 +56,11 @@ apt-get install -y --no-install-recommends \
 aarch64-linux-gnu-gcc --version | head -1
 
 # ------------------------------------------------------------
-# 3. Native Bibliotheken herunterladen
+# 3. android/log.h systemweit bereitstellen
 # ------------------------------------------------------------
-echo "==> Lade Dead Effect native libs"
-wget -q -O arm64-v8a.zip "$DE_LIBS_URL"
-unzip -o arm64-v8a.zip -d de_libs/
-find de_libs -name "*.so" -exec ls -la {} \;
-
-# ------------------------------------------------------------
-# 4. Chrono-Trigger-Loader-Quellen klonen
-# ------------------------------------------------------------
-echo "==> Klone Chrono-Trigger-Loader-Quellen"
-if ! git clone --depth=1 https://gitee.com/windstarry/portmaster_chrono.git chrono-src 2>/dev/null; then
-    git clone --depth=1 https://github.com/windstarry/portmaster_chrono.git chrono-src 2>/dev/null || {
-        echo "[FEHLER] Chrono-Trigger-Repo nicht erreichbar"
-        exit 1
-    }
-fi
-
-cd chrono-src/chrono
-ls -la src/
-
-# ------------------------------------------------------------
-# 5. Kompatibilitaets-Header erstellen
-#    (Android-NDK und Cocos2d-Konstanten stubben)
-# ------------------------------------------------------------
-echo "==> Erstelle Kompatibilitaets-Header"
-
-mkdir -p src/compat/android
-
-# android/log.h Stub
-cat > src/compat/android/log.h <<'EOF'
+echo "==> Erstelle android/log.h systemweit"
+mkdir -p /usr/include/android
+cat > /usr/include/android/log.h <<'EOF'
 #ifndef COMPAT_ANDROID_LOG_H
 #define COMPAT_ANDROID_LOG_H
 
@@ -122,192 +99,45 @@ static inline int __android_log_write(int prio, const char* tag, const char* tex
 #endif
 EOF
 
-# Cocos2d-Konstanten-Stub
-cat > src/compat/cocos_stubs.h <<'EOF'
-#ifndef COMPAT_COCOS_STUBS_H
-#define COMPAT_COCOS_STUBS_H
-
-/* Cocos2d-Controller-Konstanten (Dummies, werden nicht verwendet) */
-#define CK_BUTTON_A                  1000
-#define CK_BUTTON_B                  1001
-#define CK_BUTTON_X                  1002
-#define CK_BUTTON_Y                  1003
-#define CK_BUTTON_DPAD_LEFT          1004
-#define CK_BUTTON_DPAD_RIGHT         1005
-#define CK_BUTTON_DPAD_UP            1006
-#define CK_BUTTON_DPAD_DOWN          1007
-#define CK_BUTTON_LEFT_THUMBSTICK    1008
-#define CK_BUTTON_RIGHT_THUMBSTICK   1009
-#define CK_BUTTON_START              1010
-#define CK_BUTTON_SELECT             1011
-#define CK_BUTTON_L1                 1012
-#define CK_BUTTON_L2                 1013
-#define CK_BUTTON_R1                 1014
-#define CK_BUTTON_R2                 1015
-
-#define CK_JOYSTICK_LEFT_X           2000
-#define CK_JOYSTICK_LEFT_Y           2001
-#define CK_JOYSTICK_RIGHT_X          2002
-#define CK_JOYSTICK_RIGHT_Y          2003
-
-#endif
-EOF
+# ------------------------------------------------------------
+# 4. Dead Effect native libs
+# ------------------------------------------------------------
+echo "==> Lade Dead Effect native libs"
+wget -q -O arm64-v8a.zip "$DE_LIBS_URL"
+unzip -o arm64-v8a.zip -d de_libs/
+find de_libs -name "*.so" -exec ls -la {} \;
 
 # ------------------------------------------------------------
-# 6. main.c chirurgisch patchen (NICHT aggressiv!)
+# 5. Chrono-Trigger-Loader-Quellen klonen
 # ------------------------------------------------------------
-echo "==> Patche main.c"
-python3 - <<'PYEOF'
-import os
-path = "src/main.c"
-if not os.path.exists(path):
-    print("[WARN] main.c nicht gefunden")
-else:
-    with open(path) as f:
-        content = f.read()
+echo "==> Klone Chrono-Trigger-Loader-Quellen"
+if ! git clone --depth=1 https://gitee.com/windstarry/portmaster_chrono.git chrono-src 2>/dev/null; then
+    git clone --depth=1 https://github.com/windstarry/portmaster_chrono.git chrono-src 2>/dev/null || {
+        echo "[FEHLER] Chrono-Trigger-Repo nicht erreichbar"
+        exit 1
+    }
+fi
 
-    orig = content
-
-    # 6a. Cocos-Stubs-Header ganz oben einbinden (nach den System-Includes)
-    if '#include "cocos_stubs.h"' not in content and 'compat/cocos_stubs.h' not in content:
-        # Nach den letzten #include-Zeilen einfuegen
-        lines = content.split('\n')
-        last_include = 0
-        for i, line in enumerate(lines):
-            if line.strip().startswith('#include'):
-                last_include = i
-        lines.insert(last_include + 1, '#include "cocos_stubs.h"')
-        content = '\n'.join(lines)
-
-    # 6b. Bibliotheksnamen ersetzen (funktioniert)
-    content = content.replace('libchrono.so', 'libmain.so')
-    content = content.replace('libc++_shared.so', 'libunity.so')
-    content = content.replace('libencrypt.so', 'libil2cpp.so')
-
-    # 6c. Package-Name ersetzen
-    content = content.replace(
-        'com.square_enix.android_googleplay.chrono_trigger',
-        'com.bulkypix.deadeffect'
-    )
-
-    # 6d. KEINE Kommentar-Manipulation!
-    # Wir lassen alle cocos2d:: Referenzen in Ruhe.
-    # Sie sind nur in Kommentaren/Deklarationen und schaden nicht.
-
-    if content != orig:
-        with open(path, "w") as f:
-            f.write(content)
-        print(f"[PATCH] main.c angepasst ({len(orig)} -> {len(content)} bytes)")
-    else:
-        print("[INFO] main.c: Keine Aenderungen noetig")
-PYEOF
+cd chrono-src/chrono
+ls -la src/
 
 # ------------------------------------------------------------
-# 7. jni_shim.c: android/log.h durch compat ersetzen
+# 6. main.c minimal patchen (nur Bibliotheksnamen + Package)
 # ------------------------------------------------------------
-echo "==> Patche jni_shim.c"
-python3 - <<'PYEOF'
-import os
-path = "src/jni_shim.c"
-if not os.path.exists(path):
-    print("[WARN] jni_shim.c nicht gefunden")
-else:
-    with open(path) as f:
-        content = f.read()
-
-    orig = content
-
-    # android/log.h durch compat-Pfad ersetzen (funktioniert mit -I)
-    # Eigentlich reicht es, wenn -I src/compat gesetzt ist.
-
-    # Cocos2d-JNI-Funktionen finden und durch Log-Meldungen ergaenzen
-    # (NICHT die Funktionskoerper entfernen!)
-    if 'Java_org_cocos2dx_lib_Cocos2dxHelper_nativeSetContext' in content:
-        print("[INFO] Cocos2d-JNI-Funktionen noch vorhanden - werden bleiben")
-
-    if content != orig:
-        with open(path, "w") as f:
-            f.write(content)
-        print(f"[PATCH] jni_shim.c angepasst")
-    else:
-        print("[INFO] jni_shim.c: Keine Aenderungen noetig")
-PYEOF
+echo "==> Patche main.c minimal"
+sed -i 's/libchrono\.so/libmain.so/g' src/main.c
+sed -i 's/libc++_shared\.so/libunity.so/g' src/main.c
+sed -i 's/libencrypt\.so/libil2cpp.so/g' src/main.c
+sed -i 's/com\.square_enix\.android_googleplay\.chrono_trigger/com.bulkypix.deadeffect/g' src/main.c
 
 # ------------------------------------------------------------
-# 8. imports.c: Android-Stubs hinzufuegen (unveraendert von vorher)
+# 7. Compiler-Flags
 # ------------------------------------------------------------
-echo "==> Erweitere imports.c"
-python3 - <<'PYEOF'
-import os
-path = "src/imports.c"
-if not os.path.exists(path):
-    print("[WARN] imports.c nicht gefunden")
-else:
-    with open(path) as f:
-        content = f.read()
-
-    if 'ASensorManager_createEventQueue' in content:
-        print("[SKIP] imports.c: Android-Stubs bereits vorhanden")
-    else:
-        android_stubs = r'''
-
-/* ============================================================
- * [PATCHED] Android-Sensor/Looper/Window/Property-Stubs
- * ============================================================ */
-#include <stdint.h>
-#include <stddef.h>
-
-void* ASensorManager_createEventQueue(void* m, void* l, int id, void* cb, void* data) { return NULL; }
-void* ASensorManager_getInstance(void) { return NULL; }
-void* ASensorManager_getSensorList(void* m, int* count) { if(count) *count = 0; return NULL; }
-void* ASensorManager_getDefaultSensor(void* m, int type) { return NULL; }
-void  ASensorManager_destroyEventQueue(void* m, void* q) {}
-int   ASensor_getMinDelay(void* s) { return 0; }
-int   ASensor_getType(void* s) { return 0; }
-const char* ASensor_getName(void* s) { return "stub"; }
-const char* ASensor_getVendor(void* s) { return "stub"; }
-float ASensor_getResolution(void* s) { return 1.0f; }
-int   ASensorEventQueue_getEvents(void* q, void* events, int count) { return 0; }
-int   ASensorEventQueue_hasEvents(void* q) { return 0; }
-int   ASensorEventQueue_enableSensor(void* q, void* s) { return 0; }
-int   ASensorEventQueue_disableSensor(void* q, void* s) { return 0; }
-int   ASensorEventQueue_setEventRate(void* q, void* s, int rate) { return 0; }
-
-void* ALooper_prepare(int opts) { return NULL; }
-void* ALooper_forThread(void) { return NULL; }
-int   ALooper_pollAll(int timeout, int* fd, int* events, void** data) { return -1; }
-void  ALooper_acquire(void* looper) {}
-void  ALooper_release(void* looper) {}
-void  ALooper_wake(void* looper) {}
-
-void ANativeWindow_acquire(void* window) {}
-void ANativeWindow_release(void* window) {}
-int  ANativeWindow_getWidth(void* window) { return 640; }
-int  ANativeWindow_getHeight(void* window) { return 480; }
-
-int   __system_property_read(void* pi, char* name, char* value) { return 0; }
-void* __system_property_find(const char* name) { return NULL; }
-'''
-        content = content + android_stubs
-        with open(path, "w") as f:
-            f.write(content)
-        print("[PATCH] imports.c: Android-Stubs hinzugefuegt")
-PYEOF
-
-# ------------------------------------------------------------
-# 9. Loader bauen
-# ------------------------------------------------------------
-echo "==> Baue Loader mit aarch64-linux-gnu-gcc"
-
-SRCS=$(ls src/*.c 2>/dev/null)
-echo "Quelldateien: $SRCS"
-
-# Compiler-Flags MIT compat-Pfad
 CFLAGS="-D_GNU_SOURCE -O2 -fPIC -fno-omit-frame-pointer -rdynamic"
 CFLAGS="$CFLAGS -Wno-int-conversion -Wno-incompatible-pointer-types"
 CFLAGS="$CFLAGS -Wno-implicit-function-declaration -Wno-pointer-sign"
 CFLAGS="$CFLAGS -Wno-deprecated-declarations -Wno-error"
-CFLAGS="$CFLAGS -I src -I src/compat"
+CFLAGS="$CFLAGS -I src"
 
 for inc in \
     "/usr/aarch64-linux-gnu/include" \
@@ -320,31 +150,93 @@ for inc in \
     fi
 done
 
+# ------------------------------------------------------------
+# 8. Automatische Extraktion der fehlenden Konstanten
+# ------------------------------------------------------------
+echo "==> Identifiziere fehlende CK_*-Konstanten"
+
+# Kompiliere main.c ohne Extra-Header und sammle Fehler
+set +e
+aarch64-linux-gnu-gcc $CFLAGS -c src/main.c -o /tmp/main.o 2> /tmp/main_errors.txt
+set -e
+
+# Extrahiere undeclared identifiers aus den Fehlern
+MISSING=$(grep -oP "error: '\K[A-Z_][A-Z0-9_]*(?=' undeclared)" /tmp/main_errors.txt | sort -u)
+
+if [ -n "$MISSING" ]; then
+    echo "Fehlende Konstanten:"
+    echo "$MISSING"
+
+    # Generiere cocos_extra.h mit #ifndef-Guards
+    cat > src/cocos_extra.h <<'HEADEREOF'
+/* Auto-generiert: fehlende Cocos2d-Konstanten */
+#ifndef COCOS_EXTRA_H
+#define COCOS_EXTRA_H
+
+HEADEREOF
+
+    COUNTER=9000
+    for CONST in $MISSING; do
+        cat >> src/cocos_extra.h <<EOF
+#ifndef $CONST
+#define $CONST $COUNTER
+#endif
+EOF
+        COUNTER=$((COUNTER + 1))
+    done
+
+    cat >> src/cocos_extra.h <<'HEADEREOF'
+
+#endif
+HEADEREOF
+
+    echo "==> cocos_extra.h erstellt"
+    cat src/cocos_extra.h
+else
+    echo "==> Keine fehlenden Konstanten gefunden"
+    echo "" > src/cocos_extra.h
+fi
+
+# ------------------------------------------------------------
+# 9. Alle Quelldateien kompilieren
+# ------------------------------------------------------------
+echo "==> Kompiliere alle Quelldateien"
+
+# Objekt-Dateien sammeln
+OBJS=""
+for src in src/*.c; do
+    # main.c bekommt den Extra-Header
+    if [ "$(basename "$src")" = "main.c" ]; then
+        aarch64-linux-gnu-gcc $CFLAGS -include src/cocos_extra.h -c "$src" -o "/tmp/$(basename "$src").o" 2>&1 | tail -20
+    else
+        aarch64-linux-gnu-gcc $CFLAGS -c "$src" -o "/tmp/$(basename "$src").o" 2>&1 | tail -5
+    fi
+    OBJS="$OBJS /tmp/$(basename "$src").o"
+done
+
+# ------------------------------------------------------------
+# 10. Linken
+# ------------------------------------------------------------
+echo "==> Linke Loader"
+
 LDFLAGS="-L/usr/aarch64-linux-gnu/lib"
 LDFLAGS="$LDFLAGS -lSDL2 -lGLESv2 -lEGL -lfreetype -ldl -lm -lpthread -lstdc++ -lgcc_s"
 
-echo "==> Kompiliere..."
-set +e
-aarch64-linux-gnu-gcc $CFLAGS -o chrono $SRCS $LDFLAGS 2>&1 | tail -30
-BUILD_STATUS=${PIPESTATUS[0]}
-set -e
+aarch64-linux-gnu-gcc -o chrono $OBJS $LDFLAGS
 
-if [ ! -f chrono ] || [ "$BUILD_STATUS" -ne 0 ]; then
-    echo "[FEHLER] Loader-Binary wurde nicht erstellt (Status: $BUILD_STATUS)"
-    for src in $SRCS; do
-        echo "--- Diagnose: $src ---"
-        aarch64-linux-gnu-gcc $CFLAGS -c "$src" -o /tmp/test.o 2>&1 | head -10
-    done
+if [ ! -f chrono ]; then
+    echo "[FEHLER] Linken fehlgeschlagen"
     exit 1
 fi
 
 echo "[OK] Loader gebaut:"
 file chrono
+ls -la chrono
 
 cd ../..
 
 # ------------------------------------------------------------
-# 10. Port-Paket schnueren
+# 11. Port-Paket schnueren
 # ------------------------------------------------------------
 echo "==> Erstelle Port-Paket"
 cd /work
@@ -368,7 +260,8 @@ fi
 
 cat > port/DeadEffect/README.txt << 'READMEEOF'
 Dead Effect - PortMaster-Port
-Technik: Chrono-Trigger-Loader + Unity-JNI-Stubs
+Technik: Chrono-Trigger-Loader
+Installation: /roms/ports/DeadEffect/
 READMEEOF
 
 cd port && zip -r ../DeadEffect-Port.zip . > /dev/null
