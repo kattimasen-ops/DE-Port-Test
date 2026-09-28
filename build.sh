@@ -3,64 +3,52 @@
 # Dead Effect Port - Unity-IL2CPP Loader
 # Ziel: M9 Pro / R36S (RK3326, aarch64, GLIBC 2.31)
 #
-# Kombiniert:
-#   - Chrono Trigger Port (so_util, Linux-nativ)
-#   - Phigros NX (Unity JNI + NDK-Shims)
-#   - FalsoJNI (Fake-JVM)
+# Kombiniert: Chrono (so_util) + Phigros NX (Unity JNI)
+#             + FalsoJNI (Fake-JVM)
 #
-# NEU ggue. alter Version:
-#   - JNI-Metadaten-Extraktion aus DE-.so-Dateien
-#   - Android-Property-Shim (__system_property_read/find)
-#   - OpenSL-ES-Shim aus Chrono
-#   - OBB-Handling im Launcher
-#   - Capability-Report (nxcompat-Äquivalent)
-#   - Symbol-Resolution-Check vor dem Linken
-#   - ROBUST: bricht NICHT mehr bei Fehlern ab
-#   - Diagnose-Artefakte landen IMMER im ZIP
+# ROBUSTHEITS-REGELN (lehren aus dem letzten Build):
+#   1. NIEMALS `set -e` / `set +e` – auch nicht temporär.
+#   2. Platzhalter für ALLE finalen Artefakte ganz oben anlegen.
+#   3. Compile/Link laufen in Subshells; Fehler propagieren nicht.
+#   4. WORK liegt INNERHALB von $GITHUB_WORKSPACE.
 # ============================================================
-
-# KEIN 'set -e' – wir wollen Diagnose-Artefakte auch bei Fehlern.
-set -uo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
-# ---- Output IMMER ins GitHub-Workspace -------------------
+# ---- Output-Verzeichnisse --------------------------------
 if [ -n "${GITHUB_WORKSPACE:-}" ]; then
     OUT="$GITHUB_WORKSPACE"
 else
     OUT="$PWD"
 fi
-WORK="${WORK:-/work}"
+WORK="${WORK:-$OUT/work}"
 mkdir -p "$OUT" "$WORK"
 
-# ---- Diagnose-Falle --------------------------------------
-diagnose() {
-    local rc=$?
-    echo ""
-    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-    echo "!! FEHLER (rc=$rc) in Zeile ${BASH_LINENO[0]:-?}"
-    echo "!! Befehl: ${BASH_COMMAND:-?}"
-    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-    echo "--- letzte 40 Zeilen Build-Log ---"
-    [ -f "$WORK/build.log" ] && tail -40 "$WORK/build.log" || true
-    echo "---------------------------------------------------------"
-}
-trap diagnose ERR
-
-# ---- Alles doppelt loggen --------------------------------
 BUILD_LOG="$WORK/build.log"
-: > "$BUILD_LOG"
-exec > >(tee -a "$BUILD_LOG") 2>&1
+SYMS_FILE="$WORK/undefined_symbols.txt"
+JNI_META="$WORK/jni_meta"
+SRC="$WORK/loader_src"
+ZIP_FILE="$OUT/DeadEffect-Port.zip"
 
-echo "==> GITHUB_WORKSPACE = $OUT"
-echo "==> WORK             = $WORK"
-echo "==> PWD              = $PWD"
-echo "==> Ziel: M9 Pro / R36S (RK3326, aarch64, GLIBC 2.31)"
+# ---- PLATZHALTER: immer vorhanden, egal wo das Skript stirbt ----
+: > "$BUILD_LOG"
+: > "$SYMS_FILE"
+mkdir -p "$JNI_META"
+echo "Build gestartet: $(date -u)" > "$SYMS_FILE"
+
+# ---- Log-Duplikation (kein exec-redirect in Subshell nötig) ----
+# Wir schreiben in eine Funktion, die wir überall aufrufen.
+log() { echo "$@" | tee -a "$BUILD_LOG" >&2; }
+
+log "==> GITHUB_WORKSPACE = $OUT"
+log "==> WORK             = $WORK"
+log "==> PWD              = $PWD"
+log "==> Ziel: M9 Pro / R36S (RK3326, aarch64, GLIBC 2.31)"
 
 # ------------------------------------------------------------
 # 1. Multiarch + apt-Quellen
 # ------------------------------------------------------------
-dpkg --add-architecture arm64 || true
+dpkg --add-architecture arm64 2>/dev/null || true
 
 cat > /etc/apt/sources.list.d/amd64.list <<'EOF'
 deb [arch=amd64] http://archive.ubuntu.com/ubuntu focal main restricted universe multiverse
@@ -75,12 +63,12 @@ deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-security main restri
 EOF
 
 rm -f /etc/apt/sources.list
-apt-get update || echo "[WARN] apt-get update teilweise fehlgeschlagen"
+apt-get update 2>&1 | tee -a "$BUILD_LOG" || log "[WARN] apt-get update teilweise fehlgeschlagen"
 
 # ------------------------------------------------------------
 # 2. Cross-Toolchain + Bibliotheken
 # ------------------------------------------------------------
-echo "==> Installiere Cross-Toolchain"
+log "==> Installiere Cross-Toolchain"
 apt-get install -y --no-install-recommends \
   build-essential cmake ninja-build git pkg-config ca-certificates \
   wget curl file zip unzip python3 patchelf \
@@ -91,18 +79,16 @@ apt-get install -y --no-install-recommends \
   libfreetype6-dev:arm64 libsdl2-dev:arm64 \
   libsdl2-image-dev:arm64 \
   zlib1g-dev:arm64 \
-  || echo "[WARN] Einige Pakete konnten nicht installiert werden"
+  2>&1 | tee -a "$BUILD_LOG" || log "[WARN] Einige Pakete konnten nicht installiert werden"
 
-aarch64-linux-gnu-gcc --version | head -1 || echo "[WARN] Cross-GCC fehlt"
+aarch64-linux-gnu-gcc --version 2>&1 | head -1 | tee -a "$BUILD_LOG" || log "[WARN] Cross-GCC fehlt"
 
 # ------------------------------------------------------------
-# 3. Compat-Header (Linux <-> Android <-> Switch)
+# 3. Compat-Header
 # ------------------------------------------------------------
-echo "==> Erstelle Compat-Header"
-
+log "==> Erstelle Compat-Header"
 mkdir -p /usr/include/android
 
-# android/log.h
 cat > /usr/include/android/log.h <<'EOF'
 #ifndef COMPAT_ANDROID_LOG_H
 #define COMPAT_ANDROID_LOG_H
@@ -123,17 +109,13 @@ int __android_log_write(int prio, const char *tag, const char *text);
 #endif
 EOF
 
-# android/native_window.h
 cat > /usr/include/android/native_window.h <<'EOF'
 #ifndef COMPAT_ANATIVE_WINDOW_H
 #define COMPAT_ANATIVE_WINDOW_H
 #include <stdint.h>
 typedef struct ANativeWindow ANativeWindow;
 struct ANativeWindow {
-    int32_t width;
-    int32_t height;
-    int32_t format;
-    void *user_data;
+    int32_t width; int32_t height; int32_t format; void *user_data;
 };
 void ANativeWindow_acquire(ANativeWindow *w);
 void ANativeWindow_release(ANativeWindow *w);
@@ -144,7 +126,6 @@ int32_t ANativeWindow_setBuffersGeometry(ANativeWindow *w, int32_t width, int32_
 #endif
 EOF
 
-# android/looper.h
 cat > /usr/include/android/looper.h <<'EOF'
 #ifndef COMPAT_ALOOPER_H
 #define COMPAT_ALOOPER_H
@@ -166,7 +147,6 @@ int ALooper_removeFd(ALooper *l, int fd);
 #endif
 EOF
 
-# android/sensor.h
 cat > /usr/include/android/sensor.h <<'EOF'
 #ifndef COMPAT_ASENSOR_H
 #define COMPAT_ASENSOR_H
@@ -176,14 +156,9 @@ typedef struct ASensorManager ASensorManager;
 typedef struct ASensorEventQueue ASensorEventQueue;
 typedef struct ASensor ASensor;
 typedef struct ASensorEvent {
-    int32_t version;
-    int32_t sensor;
-    int32_t type;
-    int32_t reserved0;
-    int64_t timestamp;
-    union { float data[16]; };
-    uint32_t flags;
-    int32_t reserved1[3];
+    int32_t version; int32_t sensor; int32_t type; int32_t reserved0;
+    int64_t timestamp; union { float data[16]; };
+    uint32_t flags; int32_t reserved1[3];
 } ASensorEvent;
 enum { ASENSOR_TYPE_ACCELEROMETER = 1, ASENSOR_TYPE_MAGNETIC_FIELD = 2, ASENSOR_TYPE_GYROSCOPE = 4 };
 ASensorManager *ASensorManager_getInstance(void);
@@ -205,7 +180,6 @@ float ASensor_getResolution(ASensor const *s);
 #endif
 EOF
 
-# Switch-Compat (nur für Phigros-Code)
 mkdir -p /usr/include/switch_compat
 cat > /usr/include/switch_compat/switch.h <<'EOF'
 #ifndef COMPAT_SWITCH_H
@@ -241,138 +215,116 @@ static inline void fatal_error(const char *fmt, ...) {
 #endif
 EOF
 
-echo "[OK] Compat-Header geschrieben"
+log "[OK] Compat-Header geschrieben"
 
 # ------------------------------------------------------------
-# 4. Dead Effect .so-Dateien holen
+# 4. Dead Effect .so-Dateien
 # ------------------------------------------------------------
-echo "==> Lade Dead Effect native libs"
-cd "$WORK"
-mkdir -p de_libs
+log "==> Lade Dead Effect native libs"
+mkdir -p "$WORK/de_libs"
 if [ -n "${DE_LIBS_URL:-}" ]; then
-    wget -q -O arm64-v8a.zip "$DE_LIBS_URL" || echo "[WARN] wget fehlgeschlagen"
-    unzip -o arm64-v8a.zip -d de_libs/ >/dev/null 2>&1 || echo "[WARN] unzip fehlgeschlagen"
+    wget -q -O "$WORK/arm64-v8a.zip" "$DE_LIBS_URL" 2>>"$BUILD_LOG" || log "[WARN] wget fehlgeschlagen"
+    unzip -o "$WORK/arm64-v8a.zip" -d "$WORK/de_libs/" >/dev/null 2>&1 || log "[WARN] unzip fehlgeschlagen"
 else
-    echo "[WARN] DE_LIBS_URL nicht gesetzt – erwarte .so in de_libs/arm64-v8a/"
+    log "[WARN] DE_LIBS_URL nicht gesetzt – erwarte .so in de_libs/arm64-v8a/"
 fi
 
-DE_MAIN=de_libs/arm64-v8a/libmain.so
-DE_UNITY=de_libs/arm64-v8a/libunity.so
-DE_IL2CPP=de_libs/arm64-v8a/libil2cpp.so
+DE_MAIN="$WORK/de_libs/arm64-v8a/libmain.so"
+DE_UNITY="$WORK/de_libs/arm64-v8a/libunity.so"
+DE_IL2CPP="$WORK/de_libs/arm64-v8a/libil2cpp.so"
 
 for f in "$DE_MAIN" "$DE_UNITY" "$DE_IL2CPP"; do
     if [ -f "$f" ]; then
-        echo "  $(basename "$f"): $(stat -c%s "$f") bytes"
+        log "  $(basename "$f"): $(stat -c%s "$f") bytes"
     else
-        echo "  [WARN] $f fehlt"
+        log "  [WARN] $f fehlt"
     fi
 done
 
 # ------------------------------------------------------------
-# 5. JNI-Metadaten aus Dead Effect extrahieren
+# 5. JNI-Metadaten
 # ------------------------------------------------------------
-echo "==> Extrahiere JNI-Metadaten aus Dead Effect"
-mkdir -p "$WORK/jni_meta"
+log "==> Extrahiere JNI-Metadaten aus Dead Effect"
+mkdir -p "$JNI_META"
 
 if [ -f "$DE_MAIN" ]; then
-    strings -a "$DE_MAIN" | grep -E '^(com|android|java|org)/' | sort -u > "$WORK/jni_meta/classes_main.txt" || true
-    strings -a "$DE_MAIN" | grep -iE 'NativeLoader|bulkypix|deadeffect' | sort -u > "$WORK/jni_meta/nativeloader_hints.txt" || true
-    strings -a "$DE_MAIN" | grep -E '^\(.*\)' | sort -u > "$WORK/jni_meta/signatures_main.txt" || true
+    strings -a "$DE_MAIN" 2>/dev/null | grep -E '^(com|android|java|org)/' | sort -u > "$JNI_META/classes_main.txt" || true
+    strings -a "$DE_MAIN" 2>/dev/null | grep -iE 'NativeLoader|bulkypix|deadeffect' | sort -u > "$JNI_META/nativeloader_hints.txt" || true
+    strings -a "$DE_MAIN" 2>/dev/null | grep -E '^\(.*\)' | sort -u > "$JNI_META/signatures_main.txt" || true
 fi
-
 if [ -f "$DE_UNITY" ]; then
-    strings -a "$DE_UNITY" | grep -E '^(com|android|java|org)/' | sort -u > "$WORK/jni_meta/classes_unity.txt" || true
-    strings -a "$DE_UNITY" | grep -E '^com/unity3d/player' | sort -u > "$WORK/jni_meta/unity_classes.txt" || true
+    strings -a "$DE_UNITY" 2>/dev/null | grep -E '^(com|android|java|org)/' | sort -u > "$JNI_META/classes_unity.txt" || true
+    strings -a "$DE_UNITY" 2>/dev/null | grep -E '^com/unity3d/player' | sort -u > "$JNI_META/unity_classes.txt" || true
 fi
 
-echo "--- NativeLoader-Kandidaten ---"
-cat "$WORK/jni_meta/nativeloader_hints.txt" 2>/dev/null || echo "  (keine)"
-echo "--- Unity-Player-Klassen ---"
-cat "$WORK/jni_meta/unity_classes.txt" 2>/dev/null || echo "  (keine)"
+log "--- NativeLoader-Kandidaten ---"
+cat "$JNI_META/nativeloader_hints.txt" 2>/dev/null | tee -a "$BUILD_LOG" || true
+log "--- Unity-Player-Klassen ---"
+cat "$JNI_META/unity_classes.txt" 2>/dev/null | tee -a "$BUILD_LOG" || true
 
 PKG_NAME=$(strings -a "$DE_MAIN" 2>/dev/null | grep -oE 'com/[a-z]+/[a-z]+' | head -1 | tr '/' '.' || true)
 [ -z "$PKG_NAME" ] && PKG_NAME="com.bulkypix.deadeffect"
-echo "==> Erkannter Package-Name: $PKG_NAME"
+log "==> Erkannter Package-Name: $PKG_NAME"
 
 # ------------------------------------------------------------
 # 6. Quellen klonen
 # ------------------------------------------------------------
-echo "==> Klone Basis-Quellen"
+log "==> Klone Basis-Quellen"
 cd "$WORK"
-
-if [ ! -d chrono-src ]; then
-    git clone --depth=1 https://gitee.com/windstarry/portmaster_chrono.git chrono-src 2>/dev/null \
-        || echo "[WARN] Chrono konnte nicht geklont werden"
-fi
-
-if [ ! -d falsjni-src ]; then
-    git clone --depth=1 https://github.com/Rinnegatamante/FalsoJNI.git falsjni-src 2>/dev/null \
-        || echo "[WARN] FalsoJNI konnte nicht geklont werden"
-fi
-
-if [ ! -d phigros-src ]; then
-    git clone --depth=1 https://github.com/ChanseyIsTheBest/phigros_nx.git phigros-src 2>/dev/null \
-        || echo "[WARN] Phigros NX konnte nicht geklont werden"
-fi
-
-if [ ! -d soloader-src ]; then
-    git clone --depth=1 https://github.com/v-atamanenko/soloader-boilerplate.git soloader-src 2>/dev/null \
-        || echo "[WARN] Soloader-Boilerplate konnte nicht geklont werden"
-fi
+[ -d chrono-src ]   || git clone --depth=1 https://gitee.com/windstarry/portmaster_chrono.git chrono-src   2>>"$BUILD_LOG" || log "[WARN] Chrono"
+[ -d falsjni-src ]  || git clone --depth=1 https://github.com/Rinnegatamante/FalsoJNI.git falsjni-src      2>>"$BUILD_LOG" || log "[WARN] FalsoJNI"
+[ -d phigros-src ]  || git clone --depth=1 https://github.com/ChanseyIsTheBest/phigros_nx.git phigros-src  2>>"$BUILD_LOG" || log "[WARN] Phigros"
+[ -d soloader-src ] || git clone --depth=1 https://github.com/v-atamanenko/soloader-boilerplate.git soloader-src 2>>"$BUILD_LOG" || log "[WARN] Soloader"
 
 # ------------------------------------------------------------
 # 7. Loader-Quellen zusammenstellen
 # ------------------------------------------------------------
-echo "==> Stelle Loader-Quellen zusammen"
-SRC="$WORK/loader_src"
+log "==> Stelle Loader-Quellen zusammen"
 rm -rf "$SRC"
 mkdir -p "$SRC"
 
-# 7a. so_util aus Chrono (oder Fallback soloader)
-if [ -f chrono-src/so_util.c ]; then
-    cp chrono-src/so_util.c chrono-src/so_util.h "$SRC/" 2>/dev/null || true
-    cp chrono-src/imports.c chrono-src/imports.h "$SRC/" 2>/dev/null || true
-    echo "  [OK] so_util aus Chrono"
-elif [ -f soloader-src/source/so_util.c ]; then
-    cp soloader-src/source/so_util.* "$SRC/" 2>/dev/null || true
-    echo "  [OK] so_util aus soloader-boilerplate"
+# so_util
+if [ -f "$WORK/chrono-src/so_util.c" ]; then
+    cp "$WORK/chrono-src/so_util.c" "$WORK/chrono-src/so_util.h" "$SRC/" 2>/dev/null || true
+    cp "$WORK/chrono-src/imports.c" "$WORK/chrono-src/imports.h" "$SRC/" 2>/dev/null || true
+    log "  [OK] so_util aus Chrono"
+elif [ -f "$WORK/soloader-src/source/so_util.c" ]; then
+    cp "$WORK/soloader-src/source/so_util."* "$SRC/" 2>/dev/null || true
+    log "  [OK] so_util aus soloader-boilerplate"
 else
-    echo "  [WARN] Keine so_util-Quelle gefunden"
+    log "  [WARN] Keine so_util-Quelle gefunden"
 fi
 
-# 7b. JNI-Shim aus FalsoJNI
-if [ -d falsjni-src/src ]; then
-    cp falsjni-src/src/*.c falsjni-src/src/*.h "$SRC/" 2>/dev/null || true
-    echo "  [OK] FalsoJNI kopiert"
+# FalsoJNI
+if [ -d "$WORK/falsjni-src/src" ]; then
+    cp "$WORK/falsjni-src/src/"*.c "$WORK/falsjni-src/src/"*.h "$SRC/" 2>/dev/null || true
+    log "  [OK] FalsoJNI kopiert"
 fi
 
-# 7c. OpenSL-ES-Shim aus Chrono
-if [ -f chrono-src/opensles_shim.c ]; then
-    cp chrono-src/opensles_shim.c chrono-src/opensles_shim.h "$SRC/" 2>/dev/null || true
-    echo "  [OK] OpenSL-Shim aus Chrono"
+# OpenSL
+if [ -f "$WORK/chrono-src/opensles_shim.c" ]; then
+    cp "$WORK/chrono-src/opensles_shim.c" "$WORK/chrono-src/opensles_shim.h" "$SRC/" 2>/dev/null || true
+    log "  [OK] OpenSL-Shim aus Chrono"
 fi
 
-# 7d. Unity-spezifische NDK-Funktionen aus Phigros
-if [ -f phigros-src/source/android_native_unity.c ]; then
-    cp phigros-src/source/android_native_unity.c "$SRC/unity_ndk.c" 2>/dev/null || true
+# Phigros Unity-NDK
+if [ -f "$WORK/phigros-src/source/android_native_unity.c" ]; then
+    cp "$WORK/phigros-src/source/android_native_unity.c" "$SRC/unity_ndk.c" 2>/dev/null || true
     sed -i '/#include <switch/d' "$SRC/unity_ndk.c" 2>/dev/null || true
     sed -i '/#include <switch\//d' "$SRC/unity_ndk.c" 2>/dev/null || true
     sed -i 's/padInitializeDefault(.*);/\/* compat *\//g' "$SRC/unity_ndk.c" 2>/dev/null || true
     sed -i 's/hidScanInput();/\/* compat *\//g' "$SRC/unity_ndk.c" 2>/dev/null || true
-    echo "  [OK] Unity-NDK aus Phigros portiert"
+    log "  [OK] Unity-NDK aus Phigros portiert"
 fi
 
-# 7e. Unity-JNI aus Phigros
-if [ -f phigros-src/source/unity_jni.c ]; then
-    cp phigros-src/source/unity_jni.c "$SRC/" 2>/dev/null || true
+if [ -f "$WORK/phigros-src/source/unity_jni.c" ]; then
+    cp "$WORK/phigros-src/source/unity_jni.c" "$SRC/" 2>/dev/null || true
     sed -i '/#include <switch/d' "$SRC/unity_jni.c" 2>/dev/null || true
-    echo "  [OK] unity_jni.c kopiert"
+    log "  [OK] unity_jni.c kopiert"
 fi
 
-# 7f. android_shim.c
+# ---- android_shim.c ----
 cat > "$SRC/android_shim.c" <<'SHIMEOF'
-/* android_shim.c – Implementierung der Android-NDK-Symbole,
- * die von libunity.so / libil2cpp.so importiert werden. */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -406,7 +358,6 @@ int __android_log_write(int prio, const char *tag, const char *s) {
 }
 
 extern ANativeWindow *g_android_window;
-
 void ANativeWindow_acquire(ANativeWindow *w) { (void)w; }
 void ANativeWindow_release(ANativeWindow *w) { (void)w; }
 int32_t ANativeWindow_getWidth(ANativeWindow *w)  { return w ? w->width  : 0; }
@@ -483,7 +434,37 @@ const void *__system_property_find(const char *name) { (void)name; return NULL; 
 int __system_property_set(const char *name, const char *value) { return 0; }
 SHIMEOF
 
-# 7g. loader_main.c
+# ---- loader_main.c ----
 cat > "$SRC/loader_main.c" <<'MAINEOF'
-/* loader_main.c – Dead Effect Unity-IL2CPP Loader */
-#define _
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <dlfcn.h>
+#include <SDL2/SDL.h>
+#include <EGL/egl.h>
+#include <GLES2/gl2.h>
+#include <android/log.h>
+#include <android/native_window.h>
+#include "so_util.h"
+#include "jni_shim.h"
+
+#define TAG "deadeffect"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+
+#ifndef DEAD_EFFECT_LIBDIR
+#define DEAD_EFFECT_LIBDIR "/roms/ports/DeadEffect/lib"
+#endif
+#ifndef DEAD_EFFECT_ASSETS
+#define DEAD_EFFECT_ASSETS "/roms/ports/DeadEffect/assets"
+#endif
+
+ANativeWindow *g_android_window = NULL;
+
+static void *libmain_h  = NULL;
+static void *libunity_h = NULL;
+static void *libil2cpp_h = NULL;
+
+typedef unsigned int (*JNI_OnLoad_t)(void *, void *);
+typedef void  (*UnityPla
