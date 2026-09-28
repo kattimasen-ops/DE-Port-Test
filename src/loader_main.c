@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <dlfcn.h>
+#include <signal.h>
+#include <execinfo.h>
 #include <SDL2/SDL.h>
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
@@ -14,6 +16,23 @@
 #define TAG "deadeffect"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+
+/* ============================================================
+ * Crash-Handler: gibt Backtrace bei Signal
+ * ============================================================ */
+static void crash_handler(int sig) {
+    void *bt[64];
+    int n = backtrace(bt, 64);
+    fprintf(stderr, "\n");
+    fprintf(stderr, "########################################\n");
+    fprintf(stderr, "### SIGNAL %d EMPFANGEN — Backtrace ###\n", sig);
+    fprintf(stderr, "########################################\n");
+    backtrace_symbols_fd(bt, n, 2);   /* 2 = STDERR */
+    fprintf(stderr, "########################################\n");
+    fprintf(stderr, "### END BACKTRACE ###\n");
+    fprintf(stderr, "########################################\n");
+    _exit(128 + sig);
+}
 
 #ifndef DEAD_EFFECT_LIBDIR
 #define DEAD_EFFECT_LIBDIR "/roms/ports/DeadEffect/lib"
@@ -28,13 +47,13 @@ void *g_libunity_handle = NULL;
 void *g_libil2cpp_handle = NULL;
 
 typedef int  (*JNI_OnLoad_t)(void *vm, void *reserved);
-typedef void (*UnityPlayer_initJni_t)(void *, void *, void *);
-typedef unsigned char (*UnityPlayer_nativeRender_t)(void *, void *, long long, int, int);
-typedef void (*UnityPlayer_nativePause_t)(void *, void *);
+typedef void (*initJni_t)(void *, void *, void *);
+typedef unsigned char (*nativeRender_t)(void *, void *, long long, int, int);
+typedef void (*nativePause_t)(void *, void *);
 
-static UnityPlayer_initJni_t      unity_init_jni      = NULL;
-static UnityPlayer_nativeRender_t unity_native_render = NULL;
-static UnityPlayer_nativePause_t  unity_native_pause  = NULL;
+static initJni_t      unity_init_jni      = NULL;
+static nativeRender_t unity_native_render = NULL;
+static nativePause_t  unity_native_pause  = NULL;
 
 static SDL_Window   *sdl_win = NULL;
 static SDL_GLContext sdl_ctx = NULL;
@@ -75,14 +94,13 @@ static int video_init(void) {
     return 0;
 }
 
-/* Ruft JNI_OnLoad sicher auf */
 static void try_call_onload(const char *libname, void *handle) {
     JNI_OnLoad_t fn = (JNI_OnLoad_t) so_find_addr(handle, "JNI_OnLoad");
     if (!fn) {
-        LOGI("[%s] kein JNI_OnLoad exportiert", libname);
+        LOGI("[%s] kein JNI_OnLoad", libname);
         return;
     }
-    LOGI("[%s] Rufe JNI_OnLoad(%p) mit vm=%p ...", libname, fn, jni_get_vm());
+    LOGI("[%s] Rufe JNI_OnLoad(%p) mit vm=%p", libname, fn, jni_get_vm());
     int ver = fn(jni_get_vm(), NULL);
     LOGI("[%s] JNI_OnLoad -> 0x%x", libname, ver);
 }
@@ -91,7 +109,16 @@ static int load_module_chain(void) {
     char path[512];
 
     /* -----------------------------------------------------------------
-     * 1. libunity.so laden
+     * 1. libil2cpp.so ZUERST laden
+     * ----------------------------------------------------------------- */
+    snprintf(path, sizeof(path), "%s/libil2cpp.so", DEAD_EFFECT_LIBDIR);
+    LOGI("Lade %s", path);
+    g_libil2cpp_handle = so_load(path);
+    if (!g_libil2cpp_handle) { LOGE("libil2cpp.so laden fehlgeschlagen"); return -1; }
+    LOGI("libil2cpp.so geladen: %p", g_libil2cpp_handle);
+
+    /* -----------------------------------------------------------------
+     * 2. libunity.so laden
      * ----------------------------------------------------------------- */
     snprintf(path, sizeof(path), "%s/libunity.so", DEAD_EFFECT_LIBDIR);
     LOGI("Lade %s", path);
@@ -100,69 +127,49 @@ static int load_module_chain(void) {
     LOGI("libunity.so geladen: %p", g_libunity_handle);
     so_dump_symbols(g_libunity_handle);
 
-    /* JNI_OnLoad von libunity aufrufen */
+    /* -----------------------------------------------------------------
+     * 3. JNI_OnLoad in libunity (registriert Native-Methoden)
+     * ----------------------------------------------------------------- */
     try_call_onload("libunity", g_libunity_handle);
 
-    /* UnityPlayer-Symbole suchen (in libunity) */
-    unity_init_jni      = (UnityPlayer_initJni_t)      so_find_addr(g_libunity_handle, "UnityPlayer_initJni");
-    unity_native_render = (UnityPlayer_nativeRender_t) so_find_addr(g_libunity_handle, "UnityPlayer_nativeRender");
-    unity_native_pause  = (UnityPlayer_nativePause_t)  so_find_addr(g_libunity_handle, "UnityPlayer_nativePause");
-
-    LOGI("  UnityPlayer_initJni      = %p", unity_init_jni);
-    LOGI("  UnityPlayer_nativeRender = %p", unity_native_render);
-    LOGI("  UnityPlayer_nativePause  = %p", unity_native_pause);
-
     /* -----------------------------------------------------------------
-     * 2. libil2cpp.so laden
-     * ----------------------------------------------------------------- */
-    snprintf(path, sizeof(path), "%s/libil2cpp.so", DEAD_EFFECT_LIBDIR);
-    LOGI("Lade %s", path);
-    g_libil2cpp_handle = so_load(path);
-    if (!g_libil2cpp_handle) { LOGE("libil2cpp.so laden fehlgeschlagen"); return -1; }
-    LOGI("libil2cpp.so geladen: %p", g_libil2cpp_handle);
-
-    try_call_onload("libil2cpp", g_libil2cpp_handle);
-
-    /* UnityPlayer_* auch in libil2cpp suchen, falls nicht in libunity */
-    if (!unity_init_jni)
-        unity_init_jni = (UnityPlayer_initJni_t) so_find_addr(g_libil2cpp_handle, "UnityPlayer_initJni");
-    if (!unity_native_render)
-        unity_native_render = (UnityPlayer_nativeRender_t) so_find_addr(g_libil2cpp_handle, "UnityPlayer_nativeRender");
-    if (!unity_native_pause)
-        unity_native_pause = (UnityPlayer_nativePause_t) so_find_addr(g_libil2cpp_handle, "UnityPlayer_nativePause");
-
-    /* -----------------------------------------------------------------
-     * 3. libmain.so laden (als letztes, hat nur JNI-Wrapper)
+     * 4. libmain.so (optional)
      * ----------------------------------------------------------------- */
     snprintf(path, sizeof(path), "%s/libmain.so", DEAD_EFFECT_LIBDIR);
     LOGI("Lade %s", path);
     g_libmain_handle = so_load(path);
     if (g_libmain_handle) {
         LOGI("libmain.so geladen: %p", g_libmain_handle);
-        so_dump_symbols(g_libmain_handle);
         try_call_onload("libmain", g_libmain_handle);
-
-        if (!unity_init_jni)
-            unity_init_jni = (UnityPlayer_initJni_t) so_find_addr(g_libmain_handle, "UnityPlayer_initJni");
-        if (!unity_native_render)
-            unity_native_render = (UnityPlayer_nativeRender_t) so_find_addr(g_libmain_handle, "UnityPlayer_nativeRender");
-        if (!unity_native_pause)
-            unity_native_pause = (UnityPlayer_nativePause_t) so_find_addr(g_libmain_handle, "UnityPlayer_nativePause");
-    } else {
-        LOGI("libmain.so nicht geladen (nicht kritisch)");
     }
 
     /* -----------------------------------------------------------------
-     * 4. UnityPlayer.initJni aufrufen
+     * 5. Registry dumpen
+     * ----------------------------------------------------------------- */
+    jni_dump_natives();
+
+    /* -----------------------------------------------------------------
+     * 6. UnityPlayer-Methoden aus der JNI-Registry holen
+     * ----------------------------------------------------------------- */
+    const char *UP = "com/unity3d/player/UnityPlayer";
+    unity_init_jni      = (initJni_t)      jni_find_native(UP, "initJni");
+    unity_native_render = (nativeRender_t) jni_find_native(UP, "nativeRender");
+    unity_native_pause  = (nativePause_t)  jni_find_native(UP, "nativePause");
+
+    LOGI("  initJni      = %p", unity_init_jni);
+    LOGI("  nativeRender = %p", unity_native_render);
+    LOGI("  nativePause  = %p", unity_native_pause);
+
+    /* -----------------------------------------------------------------
+     * 7. initJni aufrufen
      * ----------------------------------------------------------------- */
     if (unity_init_jni) {
-        void *env      = jni_get_env();
-        void *fake_ctx = env;  /* wir haben keinen echten Context */
-        LOGI("Rufe UnityPlayer.initJni(env=%p, NULL, ctx=%p)", env, fake_ctx);
-        unity_init_jni(env, NULL, fake_ctx);
-        LOGI("UnityPlayer.initJni OK");
+        void *env = jni_get_env();
+        LOGI("Rufe initJni(env=%p, NULL, NULL)", env);
+        unity_init_jni(env, NULL, NULL);
+        LOGI("initJni OK");
     } else {
-        LOGE("UnityPlayer.initJni nicht gefunden - Renderloop wird uebersprungen");
+        LOGE("initJni nicht in Registry gefunden!");
         return -1;
     }
 
@@ -170,6 +177,13 @@ static int load_module_chain(void) {
 }
 
 int main(int argc, char **argv) {
+    /* Signal-Handler installieren, damit Abstuerze einen Backtrace liefern */
+    signal(SIGSEGV, crash_handler);
+    signal(SIGABRT, crash_handler);
+    signal(SIGBUS,  crash_handler);
+    signal(SIGILL,  crash_handler);
+    signal(SIGFPE,  crash_handler);
+
     LOGI("Dead Effect Loader startet");
     LOGI("  libdir = %s", DEAD_EFFECT_LIBDIR);
     LOGI("  assets = %s", DEAD_EFFECT_ASSETS);
