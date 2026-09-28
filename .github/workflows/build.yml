@@ -1,14 +1,12 @@
-name: Build DE Wrapper (Docker / GLIBC 2.31 / Cortex-A35 + LTO)
+name: Build DE Port (Bogodroid / libjnivm / droidports)
 
 on:
   workflow_dispatch:
   push:
     paths:
-      - 'src/**'
-      - 'CMakeLists.txt'
+      - 'configs/**'
       - 'build.sh'
       - 'start.sh'
-      - 'de_wrapper.gptk'
       - '.github/workflows/build.yml'
 
 env:
