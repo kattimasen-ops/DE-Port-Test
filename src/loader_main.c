@@ -20,19 +20,15 @@
 /* ============================================================
  * Crash-Handler
  *
- * WICHTIG: glibc's abort() setzt den SIGABRT-Handler auf SIG_DFL
- * zurueck, BEVOR es raise(SIGABRT) macht. Ein signal()-Handler
- * auf SIGABRT wird also ignoriert.
- *
- * Loesung: Wir ueberschreiben abort() selbst. Der dynamische
- * Linker bevorzugt unser globales Symbol.
+ * glibc's abort() setzt SIGABRT auf SIG_DFL zurueck.
+ * Loesung: abort() selbst ueberschreiben.
  * ============================================================ */
 void abort(void) {
     void *bt[64];
     int n = backtrace(bt, 64);
     fprintf(stderr, "\n");
     fprintf(stderr, "########################################\n");
-    fprintf(stderr, "### ABORT() AUFGERUFEN — Backtrace  ###\n");
+    fprintf(stderr, "### ABORT() AUFGERUFEN - Backtrace  ###\n");
     fprintf(stderr, "########################################\n");
     backtrace_symbols_fd(bt, n, 2);
     fprintf(stderr, "########################################\n");
@@ -47,7 +43,7 @@ static void crash_handler(int sig) {
     int n = backtrace(bt, 64);
     fprintf(stderr, "\n");
     fprintf(stderr, "########################################\n");
-    fprintf(stderr, "### SIGNAL %d EMPFANGEN — Backtrace ###\n", sig);
+    fprintf(stderr, "### SIGNAL %d EMPFANGEN - Backtrace ###\n", sig);
     fprintf(stderr, "########################################\n");
     backtrace_symbols_fd(bt, n, 2);
     fprintf(stderr, "########################################\n");
@@ -84,10 +80,16 @@ static EGLDisplay    egl_dpy = EGL_NO_DISPLAY;
 static EGLSurface    egl_surf = EGL_NO_SURFACE;
 static EGLContext    egl_ctx = EGL_NO_CONTEXT;
 
+/* ============================================================
+ * Video-Init
+ * ============================================================ */
 static int video_init(void) {
     if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) < 0) {
-        LOGE("SDL_InitSubSystem: %s", SDL_GetError()); return -1;
+        LOGE("SDL_InitSubSystem: %s", SDL_GetError());
+        return -1;
     }
+    /* Audio von Unity aus, wir machen kein SDL_INIT_AUDIO hier.
+     * Der OpenSL-Shim oeffnet spaeter selbst einen Audio-Device. */
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
@@ -97,12 +99,15 @@ static int video_init(void) {
     SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+
     sdl_win = SDL_CreateWindow("Dead Effect",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 640, 480,
         SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN);
     if (!sdl_win) { LOGE("SDL_CreateWindow: %s", SDL_GetError()); return -1; }
+
     sdl_ctx = SDL_GL_CreateContext(sdl_win);
     if (!sdl_ctx) { LOGE("SDL_GL_CreateContext: %s", SDL_GetError()); return -1; }
+
     SDL_GL_SetSwapInterval(1);
     egl_dpy  = eglGetCurrentDisplay();
     egl_surf = eglGetCurrentSurface(EGL_DRAW);
@@ -110,6 +115,7 @@ static int video_init(void) {
     LOGI("EGL: dpy=%p surf=%p ctx=%p", egl_dpy, egl_surf, egl_ctx);
     LOGI("GL_VERSION: %s", glGetString(GL_VERSION));
     LOGI("GL_RENDERER: %s", glGetString(GL_RENDERER));
+
     g_android_window = calloc(1, sizeof(ANativeWindow));
     g_android_window->width  = 640;
     g_android_window->height = 480;
@@ -117,6 +123,9 @@ static int video_init(void) {
     return 0;
 }
 
+/* ============================================================
+ * JNI_OnLoad-Aufruf
+ * ============================================================ */
 static void try_call_onload(const char *libname, void *handle) {
     JNI_OnLoad_t fn = (JNI_OnLoad_t) so_find_addr(handle, "JNI_OnLoad");
     if (!fn) {
@@ -128,15 +137,40 @@ static void try_call_onload(const char *libname, void *handle) {
     LOGI("[%s] JNI_OnLoad -> 0x%x", libname, ver);
 }
 
+/* ============================================================
+ * libc++_shared.so vorladen (bevor libunity/libil2cpp geladen werden)
+ * ============================================================ */
+static void preload_libcxx(void) {
+    char p[512];
+    void *h = NULL;
+
+    snprintf(p, sizeof(p), "%s/libc++_shared.so", DEAD_EFFECT_LIBDIR);
+    h = dlopen(p, RTLD_NOW | RTLD_GLOBAL);
+    if (h) { LOGI("libc++_shared.so vorgeladen: %p", h); return; }
+
+    h = dlopen("libc++_shared.so", RTLD_NOW | RTLD_GLOBAL);
+    if (h) { LOGI("libc++_shared.so vorgeladen (via Name): %p", h); return; }
+
+    LOGE("[WARN] libc++_shared.so nicht gefunden: %s", dlerror());
+    LOGE("[WARN] lege sie unter %s/libc++_shared.so oder setze LD_LIBRARY_PATH",
+         DEAD_EFFECT_LIBDIR);
+}
+
+/* ============================================================
+ * Modul-Kette: libmain -> libunity -> libil2cpp
+ * libunity hat DT_NEEDED libmain.so, deshalb MUSS libmain
+ * zuerst geladen und initialisiert werden.
+ * ============================================================ */
 static int load_module_chain(void) {
     char path[512];
 
-    /* 1. libil2cpp.so */
-    snprintf(path, sizeof(path), "%s/libil2cpp.so", DEAD_EFFECT_LIBDIR);
+    /* 1. libmain.so */
+    snprintf(path, sizeof(path), "%s/libmain.so", DEAD_EFFECT_LIBDIR);
     LOGI("Lade %s", path);
-    g_libil2cpp_handle = so_load(path);
-    if (!g_libil2cpp_handle) { LOGE("libil2cpp.so laden fehlgeschlagen"); return -1; }
-    LOGI("libil2cpp.so geladen: %p", g_libil2cpp_handle);
+    g_libmain_handle = so_load(path);
+    if (!g_libmain_handle) { LOGE("libmain.so laden fehlgeschlagen"); return -1; }
+    LOGI("libmain.so geladen: %p", g_libmain_handle);
+    try_call_onload("libmain", g_libmain_handle);
 
     /* 2. libunity.so */
     snprintf(path, sizeof(path), "%s/libunity.so", DEAD_EFFECT_LIBDIR);
@@ -145,23 +179,20 @@ static int load_module_chain(void) {
     if (!g_libunity_handle) { LOGE("libunity.so laden fehlgeschlagen"); return -1; }
     LOGI("libunity.so geladen: %p", g_libunity_handle);
     so_dump_symbols(g_libunity_handle);
-
-    /* 3. JNI_OnLoad in libunity */
     try_call_onload("libunity", g_libunity_handle);
 
-    /* 4. libmain.so (optional) */
-    snprintf(path, sizeof(path), "%s/libmain.so", DEAD_EFFECT_LIBDIR);
+    /* 3. libil2cpp.so */
+    snprintf(path, sizeof(path), "%s/libil2cpp.so", DEAD_EFFECT_LIBDIR);
     LOGI("Lade %s", path);
-    g_libmain_handle = so_load(path);
-    if (g_libmain_handle) {
-        LOGI("libmain.so geladen: %p", g_libmain_handle);
-        try_call_onload("libmain", g_libmain_handle);
-    }
+    g_libil2cpp_handle = so_load(path);
+    if (!g_libil2cpp_handle) { LOGE("libil2cpp.so laden fehlgeschlagen"); return -1; }
+    LOGI("libil2cpp.so geladen: %p", g_libil2cpp_handle);
+    try_call_onload("libil2cpp", g_libil2cpp_handle);
 
-    /* 5. Registry dumpen */
+    /* 4. JNI-Registry ausgeben */
     jni_dump_natives();
 
-    /* 6. UnityPlayer-Methoden aus der JNI-Registry holen */
+    /* 5. UnityPlayer-Native-Methoden aus Registry holen */
     const char *UP = "com/unity3d/player/UnityPlayer";
     unity_init_jni      = (initJni_t)      jni_find_native(UP, "initJni");
     unity_native_render = (nativeRender_t) jni_find_native(UP, "nativeRender");
@@ -171,22 +202,23 @@ static int load_module_chain(void) {
     LOGI("  nativeRender = %p", unity_native_render);
     LOGI("  nativePause  = %p", unity_native_pause);
 
-    /* 7. initJni aufrufen */
-    if (unity_init_jni) {
-        void *env = jni_get_env();
-        LOGI("Rufe initJni(env=%p, NULL, NULL)", env);
-        unity_init_jni(env, NULL, NULL);
-        LOGI("initJni OK");
-    } else {
-        LOGE("initJni nicht in Registry gefunden!");
+    if (!unity_init_jni) {
+        LOGE("initJni nicht in JNI-Registry gefunden!");
         return -1;
     }
-
+    void *env = jni_get_env();
+    LOGI("Rufe initJni(env=%p, NULL, NULL)", env);
+    unity_init_jni(env, NULL, NULL);
+    LOGI("initJni OK");
     return 0;
 }
 
+/* ============================================================
+ * main
+ * ============================================================ */
 int main(int argc, char **argv) {
-    /* Nur SIGSEGV, SIGBUS, SIGILL, SIGFPE — SIGABRT faengt abort() */
+    (void)argc; (void)argv;
+
     signal(SIGSEGV, crash_handler);
     signal(SIGBUS,  crash_handler);
     signal(SIGILL,  crash_handler);
@@ -197,6 +229,10 @@ int main(int argc, char **argv) {
     LOGI("  assets = %s", DEAD_EFFECT_ASSETS);
 
     jni_shim_init();
+
+    /* libc++ VOR allen anderen .so laden */
+    preload_libcxx();
+
     if (video_init() != 0) return 1;
     if (load_module_chain() != 0) return 1;
 
