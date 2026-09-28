@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +16,14 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
+/* Fallback, falls <elf.h> eines der Makros nicht kennt (aeltere Glibc). */
+#ifndef R_AARCH64_TLSDESC
+#define R_AARCH64_TLSDESC 1031
+#endif
+#ifndef R_AARCH64_COPY
+#define R_AARCH64_COPY 1024
+#endif
+
 typedef struct {
     void *base;
     size_t size;
@@ -29,13 +36,13 @@ typedef struct {
     Elf64_Rela *jmprel; size_t jmprelcount;
     void (**init_array)(void);
     size_t init_count;
+    void (*init_fn)(void);   /* NEU: DT_INIT */
 } so_module;
 
 #define MAX_MODULES 8
 static so_module g_modules[MAX_MODULES];
 static int g_nmods = 0;
 
-/* Cache fuer wiederholte Symbol-Lookups waehrend der Relocation */
 #define SYM_CACHE_SIZE 512
 static struct {
     const char *name;
@@ -99,7 +106,10 @@ static void relocate(so_module *m, Elf64_Rela *rel, size_t count) {
         uint32_t type = ELF64_R_TYPE(r->r_info);
         uint32_t sym  = ELF64_R_SYM(r->r_info);
 
-        if (r->r_offset + sizeof(uint64_t) > m->size) {
+        /* TLSDESC braucht 16 Byte (zwei Pointer), andere 8 Byte.
+         * Wir pruefen konservativ auf 16 Byte fuer alle, damit
+         * ein TLSDESC am Rand nicht in benachbarten Speicher schreibt. */
+        if (r->r_offset + 16 > m->size) {
             LOGE("Ungueltiger Reloc-Offset 0x%lx (span=%zu) — ueberspringe",
                  (unsigned long)r->r_offset, m->size);
             continue;
@@ -108,9 +118,11 @@ static void relocate(so_module *m, Elf64_Rela *rel, size_t count) {
         uint64_t *ptr = (uint64_t *)((uintptr_t)m->base + r->r_offset);
         switch (type) {
             case R_AARCH64_NONE: break;
+
             case R_AARCH64_RELATIVE:
                 *ptr = (uint64_t)m->base + r->r_addend;
                 break;
+
             case R_AARCH64_ABS64:
             case R_AARCH64_GLOB_DAT:
             case R_AARCH64_JUMP_SLOT: {
@@ -127,6 +139,46 @@ static void relocate(so_module *m, Elf64_Rela *rel, size_t count) {
                 }
                 break;
             }
+
+            /* NEU: R_AARCH64_COPY (1024) */
+            case R_AARCH64_COPY: {
+                if (sym >= m->symcount) { *ptr = 0; break; }
+                Elf64_Sym *s = &m->symtab[sym];
+                const char *name = m->strtab + s->st_name;
+                void *src = resolve_symbol_cached(name);
+                if (!src) {
+                    LOGE("COPY unresolved: %s", name);
+                    *ptr = 0;
+                    break;
+                }
+                size_t sz = s->st_size;
+                if (sz > 0) {
+                    if (r->r_offset + sz > m->size) sz = m->size - r->r_offset;
+                    memcpy(ptr, src, sz);
+                }
+                break;
+            }
+
+            /* NEU: R_AARCH64_TLSDESC (1031)
+             * Ohne echte TLS-Laufzeit koennen wir keinen Descriptor
+             * aufloesen. Wir setzen ihn auf {0,0}. Unity-IL2CPP
+             * nutzt TLS in aller Regel nicht im Init-Pfad; falls
+             * doch, crasht es spaeter kontrolliert und wir sehen
+             * es im Backtrace. */
+            case R_AARCH64_TLSDESC: {
+                static int warned = 0;
+                if (!warned) {
+                    const char *name = (sym < m->symcount)
+                        ? m->strtab + m->symtab[sym].st_name : "?";
+                    LOGI("TLSDESC @ 0x%lx (sym=%s) — setze Descriptor=0",
+                         (unsigned long)r->r_offset, name);
+                    warned = 1;
+                }
+                ptr[0] = 0;
+                ptr[1] = 0;
+                break;
+            }
+
             default:
                 LOGI("Unknown reloc type %u at 0x%lx", type,
                      (unsigned long)r->r_offset);
@@ -135,7 +187,6 @@ static void relocate(so_module *m, Elf64_Rela *rel, size_t count) {
     }
 }
 
-/* Sucht den naechstgelegenen Funktionsnamen fuer einen Offset */
 static const char *find_nearest_symbol(so_module *m, uint64_t target_off) {
     static char buf[320];
     const char *best = NULL;
@@ -217,6 +268,7 @@ void *so_load(const char *path) {
     if (!dyn) { LOGE("no PT_DYNAMIC"); munmap(fdata, fsize); return NULL; }
 
     so_module *m = &g_modules[g_nmods++];
+    memset(m, 0, sizeof(*m));
     m->base = base; m->size = span; m->min_vaddr = min_vaddr; m->dyn = dyn;
 
     size_t rela_sz = 0, rela_ent = 0, jmprel_sz = 0;
@@ -231,13 +283,18 @@ void *so_load(const char *path) {
             case DT_RELAENT: rela_ent = d->d_un.d_val; break;
             case DT_JMPREL: m->jmprel = (void *)((char *)base + (d->d_un.d_ptr - min_vaddr)); break;
             case DT_PLTRELSZ: jmprel_sz = d->d_un.d_val; break;
-            case DT_INIT_ARRAY:  m->init_array = (void *)((char *)base + (d->d_un.d_ptr - min_vaddr)); break;
+            case DT_INIT_ARRAY:   m->init_array = (void *)((char *)base + (d->d_un.d_ptr - min_vaddr)); break;
             case DT_INIT_ARRAYSZ: m->init_count = d->d_un.d_val / sizeof(void *); break;
+            case DT_INIT:         m->init_fn    = (void *)((char *)base + (d->d_un.d_ptr - min_vaddr)); break;
             case DT_HASH:    sysv_hash = (void *)((char *)base + (d->d_un.d_ptr - min_vaddr)); break;
             case DT_GNU_HASH: gnu_hash  = (void *)((char *)base + (d->d_un.d_ptr - min_vaddr)); break;
         }
     }
-    if (rela_ent) m->relacount = rela_sz / rela_ent;
+
+    /* AArch64-ABI: Elf64_Rela ist immer 24 Byte. DT_RELAENT wird
+     * oft weggelassen — wir defaulten dann auf 24. */
+    if (rela_ent == 0) rela_ent = sizeof(Elf64_Rela);
+    m->relacount = rela_sz / rela_ent;
     m->jmprelcount = jmprel_sz / sizeof(Elf64_Rela);
 
     if (sysv_hash) {
@@ -264,8 +321,9 @@ void *so_load(const char *path) {
     } else {
         m->symcount = 65536;
     }
-    LOGI("  symcount=%zu rela=%zu jmprel=%zu init=%zu",
-         m->symcount, m->relacount, m->jmprelcount, m->init_count);
+    LOGI("  symcount=%zu rela=%zu (ent=%zu) jmprel=%zu init_array=%zu dt_init=%p",
+         m->symcount, m->relacount, rela_ent, m->jmprelcount,
+         m->init_count, m->init_fn);
 
     for (int i = 0; i < SYM_CACHE_SIZE; i++) {
         g_sym_cache[i].name = NULL;
@@ -273,26 +331,15 @@ void *so_load(const char *path) {
     }
     g_sym_cache_next = 0;
 
-    /* ---- Heap-Check VOR Relocations ---- */
-    LOGI("=== Heap-Check vor Relocations ===");
-    {
-        void *t1 = malloc(16);  LOGI("  malloc(16)  = %p", t1);  free(t1);
-        void *t2 = malloc(256); LOGI("  malloc(256) = %p", t2);  free(t2);
-        void *t3 = malloc(4096);LOGI("  malloc(4096)= %p", t3);  free(t3);
-    }
-    LOGI("=== Heap vor Relocations OK ===");
+    if (m->rela && m->relacount)     relocate(m, m->rela, m->relacount);
+    if (m->jmprel && m->jmprelcount) relocate(m, m->jmprel, m->jmprelcount);
 
-    if (m->rela && m->relacount)       relocate(m, m->rela, m->relacount);
-    if (m->jmprel && m->jmprelcount)   relocate(m, m->jmprel, m->jmprelcount);
-
-    /* ---- Heap-Check NACH Relocations ---- */
-    LOGI("=== Heap-Check nach Relocations ===");
-    {
-        void *t1 = malloc(16);  LOGI("  malloc(16)  = %p", t1);  free(t1);
-        void *t2 = malloc(256); LOGI("  malloc(256) = %p", t2);  free(t2);
-        void *t3 = malloc(4096);LOGI("  malloc(4096)= %p", t3);  free(t3);
+    /* DT_INIT VOR init_array aufrufen (ld.so-Reihenfolge). */
+    if (m->init_fn) {
+        LOGI("=== DT_INIT @ %p ===", m->init_fn);
+        m->init_fn();
+        LOGI("=== DT_INIT fertig ===");
     }
-    LOGI("=== Heap nach Relocations OK ===");
 
     if (m->init_array && m->init_count) {
         LOGI("=== init_array: %zu Eintraege (base=%p) ===",
@@ -304,7 +351,6 @@ void *so_load(const char *path) {
                  i, m->init_count, fn, (unsigned long)off,
                  find_nearest_symbol(m, off));
 
-            /* Heap-Check vor jedem Aufruf */
             void *ht = malloc(32);
             if (!ht) {
                 LOGE("  !!! Heap BROKEN vor init_array[%zu/%zu] !!!",
