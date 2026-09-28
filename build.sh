@@ -1,11 +1,12 @@
 #!/bin/bash
 # ============================================================
-# Dead Effect Port - Build mit Bogodroid-Framework
-# (droidports + libjnivm + mcpelauncher-linker)
+# Dead Effect Port - ATL-basierter Build
+# (android_translation_layer + bionic_translation + libjnivm)
 #
-# Neue Technik: Wir bauen NICHT unseren eigenen Wrapper,
-# sondern verwenden das Bogodroid-Framework, das einen
-# fertigen unityloader fuer Unity-Spiele mitbringt.
+# Neue Technik: ATL ist das Fundament. Es baut alle
+# Abhängigkeiten in der richtigen Reihenfolge:
+#   wolfSSL -> libunwind -> bionic_translation -> art_standalone
+#   -> android_translation_layer
 # ============================================================
 set -e
 
@@ -35,7 +36,7 @@ rm -f /etc/apt/sources.list
 apt-get update
 
 # ------------------------------------------------------------
-# 2. Cross-Toolchain + Clang + ARM64-Zielbibliotheken
+# 2. Cross-Toolchain + Clang + ATL-Abhängigkeiten
 # ------------------------------------------------------------
 echo "==> Installiere Cross-Toolchain (GCC + Clang)"
 apt-get install -y --no-install-recommends \
@@ -50,7 +51,10 @@ apt-get install -y --no-install-recommends \
   libgles2-mesa-dev:arm64 \
   libdrm-dev:arm64 \
   libgbm-dev:arm64 \
-  zlib1g-dev:arm64
+  libssl-dev:arm64 \
+  libunwind-dev:arm64 \
+  zlib1g-dev:arm64 \
+  meson ninja-build
 
 echo "=== GCC ==="
 aarch64-linux-gnu-gcc --version | head -1
@@ -66,28 +70,65 @@ unzip -o arm64-v8a.zip -d de_libs/
 find de_libs -name "*.so" -exec ls -la {} \;
 
 # ------------------------------------------------------------
-# 4. Bogodroid-Framework klonen
-#    Enthaelt: droidports + libjnivm + mcpelauncher-linker
+# 4. bionic_translation klonen und bauen
+#    (wird von ATL für das Laden bionic-gelinkter .so benötigt)
 # ------------------------------------------------------------
-echo "==> Klone Bogodroid-Framework"
-git clone --depth=1 --recursive https://github.com/binarycounter/bogodroid.git
-cd bogodroid
+echo "==> Klone bionic_translation"
+git clone --depth=1 https://gitlab.com/android_translation_layer/bionic_translation.git
+cd bionic_translation
 
-# Submodule initialisieren (libjnivm, mcpelauncher-linker, etc.)
-git submodule update --init --recursive
+# Cross-Compile-Toolchain für Meson
+cat > /tmp/aarch64-meson.ini <<'EOF'
+[binaries]
+c = 'aarch64-linux-gnu-gcc'
+cpp = 'aarch64-linux-gnu-g++'
+ar = 'aarch64-linux-gnu-gcc-ar'
+strip = 'aarch64-linux-gnu-strip'
 
-echo "=== Bogodroid-Struktur ==="
-ls -la
-echo "=== libjnivm ==="
-ls -la libjnivm/ 2>/dev/null || echo "libjnivm nicht gefunden"
+[host_machine]
+system = 'linux'
+cpu_family = 'aarch64'
+cpu = 'aarch64'
+endian = 'little'
+EOF
+
+mkdir -p build && cd build
+meson setup .. --cross-file /tmp/aarch64-meson.ini
+ninja
+cd ../..
+echo "[OK] bionic_translation gebaut"
 
 # ------------------------------------------------------------
-# 5. libjnivm mit Clang bauen
-#    (fuer Cross-Compile nach aarch64)
+# 5. libjnivm klonen und bauen
+#    (JNI-VM, wird von ATL für die Java-Seite benötigt)
 # ------------------------------------------------------------
-echo "==> Baue libjnivm"
+echo "==> Klone libjnivm"
+git clone --depth=1 https://github.com/ChristopherHX/libjnivm.git
+cd libjnivm
 
-# GCC-C++-Include-Pfad fuer Clang ermitteln
+mkdir -p build && cd build
+cmake .. \
+  -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
+  -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+  -DCMAKE_SYSTEM_NAME=Linux \
+  -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DJNIVM_ENABLE_TRACE=ON \
+  -DJNIVM_USE_FAKE_JNI_CODEGEN=ON
+make -j$(nproc)
+cd ../..
+echo "[OK] libjnivm gebaut"
+
+# ------------------------------------------------------------
+# 6. mcpelauncher-linker klonen und bauen
+#    (AArch64-ELF-Loader, wird von ATL als Alternative zu
+#    bionic_translation verwendet)
+# ------------------------------------------------------------
+echo "==> Klone mcpelauncher-linker"
+git clone --depth=1 --recursive https://github.com/minecraft-linux/mcpelauncher-linker.git
+cd mcpelauncher-linker
+
+# GCC-C++-Include-Pfad für Clang ermitteln
 GCC_CXX_INCLUDE=""
 for ver in 9 10 11 12; do
     if [ -d "/usr/aarch64-linux-gnu/include/c++/$ver/aarch64-linux-gnu" ]; then
@@ -96,97 +137,81 @@ for ver in 9 10 11 12; do
     fi
 done
 
-# Toolchain-File fuer Cross-Compile erstellen
-cat > /tmp/aarch64-toolchain.cmake <<TOOLCHAIN_EOF
-set(CMAKE_SYSTEM_NAME Linux)
-set(CMAKE_SYSTEM_PROCESSOR aarch64)
-set(CMAKE_C_COMPILER clang-12)
-set(CMAKE_C_COMPILER_TARGET aarch64-linux-gnu)
-set(CMAKE_CXX_COMPILER clang++-12)
-set(CMAKE_CXX_COMPILER_TARGET aarch64-linux-gnu)
-set(CMAKE_FIND_ROOT_PATH /usr/aarch64-linux-gnu)
-set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
-set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
-TOOLCHAIN_EOF
-
-# libjnivm bauen
-mkdir -p libjnivm/build && cd libjnivm/build
-cmake .. \
-  -DCMAKE_TOOLCHAIN_FILE=/tmp/aarch64-toolchain.cmake \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DJNIVM_ENABLE_TRACE=ON \
-  -DJNIVM_ENABLE_GC=ON \
-  -DJNIVM_ENABLE_DEBUG=ON \
-  -DJNIVM_USE_FAKE_JNI_CODEGEN=ON \
-  -DCMAKE_C_FLAGS="-isystem $GCC_CXX_INCLUDE" \
-  -DCMAKE_CXX_FLAGS="-isystem $GCC_CXX_INCLUDE"
-make -j$(nproc)
-cd ../..
-echo "[OK] libjnivm gebaut"
-
-# ------------------------------------------------------------
-# 6. Bogodroid-Wrapper (unityloader) bauen
-#    WICHTIG: unityloader ist der fertige Loader fuer Unity-
-#    Spiele. Er nutzt droidports (ELF-Loader) + libjnivm (JNI).
-# ------------------------------------------------------------
-echo "==> Baue unityloader"
 mkdir -p build && cd build
 cmake .. \
-  -DCMAKE_TOOLCHAIN_FILE=/tmp/aarch64-toolchain.cmake \
+  -DCMAKE_C_COMPILER=clang-12 \
+  -DCMAKE_C_COMPILER_TARGET=aarch64-linux-gnu \
+  -DCMAKE_CXX_COMPILER=clang++-12 \
+  -DCMAKE_CXX_COMPILER_TARGET=aarch64-linux-gnu \
+  -DCMAKE_SYSTEM_NAME=Linux \
+  -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
   -DCMAKE_BUILD_TYPE=Release \
-  -DPROJ=unityloader \
+  -DBUILD_SHARED_LIBS=ON \
   -DCMAKE_C_FLAGS="-isystem $GCC_CXX_INCLUDE" \
-  -DCMAKE_CXX_FLAGS="-isystem $GCC_CXX_INCLUDE"
+  -DCMAKE_CXX_FLAGS="-isystem $GCC_CXX_INCLUDE" \
+  -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld-12" \
+  -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld-12"
 make -j$(nproc)
-cd ..
-echo "[OK] unityloader gebaut"
-
-# Suchen wo das Binary liegt
-UNITYLOADER_BIN=$(find . -name "unityloader" -type f -executable | head -n1)
-echo "[OK] unityloader: $UNITYLOADER_BIN"
-file "$UNITYLOADER_BIN"
+cd ../..
+echo "[OK] mcpelauncher-linker gebaut"
 
 # ------------------------------------------------------------
-# 7. Port-Paket schnueren
+# 7. ATL klonen und bauen
+#    Das einheitliche CMake-Build-System baut alle
+#    Abhängigkeiten in der richtigen Reihenfolge.
+# ------------------------------------------------------------
+echo "==> Klone android_translation_layer"
+git clone --depth=1 https://gitlab.com/android_translation_layer/android_translation_layer.git
+cd android_translation_layer
+
+# ATL verwendet Meson für den Haupt-Build
+mkdir -p build && cd build
+meson setup .. --cross-file /tmp/aarch64-meson.ini
+ninja
+cd ../..
+echo "[OK] android_translation_layer gebaut"
+
+# ------------------------------------------------------------
+# 8. Port-Paket schnueren
 # ------------------------------------------------------------
 echo "==> Erstelle Port-Paket"
-cd /work
 rm -rf port
 mkdir -p port/DeadEffect/lib
-mkdir -p port/DeadEffect/gamefiles/unity
+mkdir -p port/DeadEffect/atl
 
-# unityloader ins Port-Verzeichnis
-cp "bogodroid/$UNITYLOADER_BIN" port/DeadEffect/unityloader
-chmod +x port/DeadEffect/unityloader
+# ATL-Binaries und Bibliotheken
+find android_translation_layer/build -name "*.so*" -exec cp {} port/DeadEffect/lib/ \; 2>/dev/null || true
+find android_translation_layer/build -name "atl-*" -executable -exec cp {} port/DeadEffect/atl/ \; 2>/dev/null || true
+
+# bionic_translation
+find bionic_translation/build -name "*.so*" -exec cp {} port/DeadEffect/lib/ \; 2>/dev/null || true
+
+# libjnivm
+find libjnivm/build -name "*.so*" -exec cp {} port/DeadEffect/lib/ \; 2>/dev/null || true
+
+# mcpelauncher-linker
+find mcpelauncher-linker/build -name "*.so*" -exec cp {} port/DeadEffect/lib/ \; 2>/dev/null || true
 
 # Dead Effect native libs
 cp de_libs/arm64-v8a/*.so port/DeadEffect/lib/ 2>/dev/null || true
 
-# libjnivm + mcpelauncher-linker Libs
-find bogodroid -name "libjnivm*.so*" -exec cp {} port/DeadEffect/lib/ \; 2>/dev/null || true
-find bogodroid -name "libmcpelauncher-linker*.so*" -exec cp {} port/DeadEffect/lib/ \; 2>/dev/null || true
-
-# Startscript + TOML-Config
+# Startscript + Config
 cp /work/start.sh port/DeadEffect/DeadEffect.sh 2>/dev/null || true
-cp /work/de_wrapper.gptk port/DeadEffect/ 2>/dev/null || true
-cp /work/configs/unity.toml port/DeadEffect/gamefiles/unity/ 2>/dev/null || true
-
 chmod +x port/DeadEffect/DeadEffect.sh 2>/dev/null || true
 
 cat > port/DeadEffect/README.txt << 'READMEEOF'
-Dead Effect - PortMaster-Port (Bogodroid-Framework)
-====================================================
+Dead Effect - PortMaster-Port (ATL-basiert)
+=============================================
 
-Technik: unityloader (droidports + libjnivm + mcpelauncher-linker)
+Technik: android_translation_layer + bionic_translation + libjnivm
+Framework: mcpelauncher-linker (AArch64-ELF-Loader)
 
 Installation:
 1. Kopiere den Ordner "DeadEffect" nach /roms/ports/
 2. Kopiere deine Dead Effect .so-Dateien nach:
    /roms/ports/DeadEffect/lib/
 3. Kopiere deine OBB-Assets nach:
-   /roms/ports/DeadEffect/gamefiles/unity/assets/
+   /roms/ports/DeadEffect/assets/bin/Data/
 4. Starte ueber EmulationStation > Ports > Dead Effect
 
 Log: /roms/ports/DeadEffect/log.txt
