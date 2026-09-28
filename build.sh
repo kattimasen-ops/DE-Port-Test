@@ -1,7 +1,6 @@
 #!/bin/bash
 # ============================================================
 # Dead Effect Port - Build-Skript
-# Alle Quellen liegen in src/ im Repo — kein Heredoc mehr.
 # ============================================================
 
 set +euo pipefail
@@ -176,9 +175,9 @@ for f in "$DE_MAIN" "$DE_UNITY" "$DE_IL2CPP"; do
     else log "  [WARN] $f fehlt"; fi
 done
 
-# ---- libc++_shared.so beschaffen und fuer glibc patchen --------------------
-# Sucht an allen plausiblen Stellen. Erste Fundstelle gewinnt.
-# Reihenfolge: Repo-Root -> libs/ -> lib/ -> src/ -> ZIP
+# ---- libc++_shared.so (wird fuer den Loader nicht mehr gebraucht, aber
+#      fuer den unwahrscheinlichen Fall, dass eine .so sie doch anfordert,
+#      bleibt sie im ZIP. Patch fuer glibc wie bisher.)
 LIBCXX_SRC=""
 for cand in \
     "$GITHUB_WS/libc++_shared.so" \
@@ -195,30 +194,20 @@ for cand in \
 done
 
 if [ -z "$LIBCXX_SRC" ]; then
-    log "  [INFO] libc++_shared.so nirgends gefunden."
-    log "         Erwartet im Repo-Root, libs/, lib/, src/ oder im ZIP."
-    log "         Auf dem Geraet wird sie dann von fix_libcxx.sh gepatcht."
+    log "  [INFO] libc++_shared.so nicht gefunden — wird nicht ins ZIP gelegt."
 fi
 
 if [ -n "$LIBCXX_SRC" ]; then
     cp "$LIBCXX_SRC" "$WORK/de_libs/arm64-v8a/libc++_shared.so"
     LIBCXX_DST="$WORK/de_libs/arm64-v8a/libc++_shared.so"
 
-    log "  libc++ Ziel: $LIBCXX_DST ($(stat -c%s "$LIBCXX_DST") Bytes)"
-    log "  libc++ Arch: $(file -b "$LIBCXX_DST" | head -1)"
-    log "  libc++ NEEDED (vor Patch):"
-    readelf -d "$LIBCXX_DST" 2>/dev/null | grep NEEDED | tee -a "$BUILD_LOG" || true
-
-    if ! command -v patchelf >/dev/null 2>&1; then
-        log "  [WARN] patchelf fehlt — ueberspringe Patch"
-    else
+    if command -v patchelf >/dev/null 2>&1; then
         HAS_ANDROID=0
         for need in $(readelf -d "$LIBCXX_DST" 2>/dev/null | grep NEEDED | awk '{print $NF}' | tr -d '[]'); do
             case "$need" in
                 libc.so|libdl.so|libm.so|libstdc++.so|liblog.so) HAS_ANDROID=1 ;;
             esac
         done
-
         if [ "$HAS_ANDROID" = "1" ]; then
             log "  [PATCH] libc++ hat Android-Namen — patche fuer glibc"
             patchelf --replace-needed libc.so      libc.so.6      "$LIBCXX_DST" 2>&1 | tee -a "$BUILD_LOG" || true
@@ -226,14 +215,48 @@ if [ -n "$LIBCXX_SRC" ]; then
             patchelf --replace-needed libm.so      libm.so.6      "$LIBCXX_DST" 2>&1 | tee -a "$BUILD_LOG" || true
             patchelf --replace-needed libstdc++.so libstdc++.so.6 "$LIBCXX_DST" 2>&1 | tee -a "$BUILD_LOG" || true
             patchelf --replace-needed liblog.so    libc.so.6      "$LIBCXX_DST" 2>&1 | tee -a "$BUILD_LOG" || true
-
-            log "  [PATCH] libc++ NEEDED (nach Patch):"
-            readelf -d "$LIBCXX_DST" 2>/dev/null | grep NEEDED | tee -a "$BUILD_LOG" || true
-        else
-            log "  libc++ hat bereits glibc-Namen — kein Patch noetig"
         fi
     fi
 fi
+
+# ------------------------------------------------------------
+# 4b. Diagnose: libil2cpp init_array[0] @ 0x80160c
+# ------------------------------------------------------------
+log "===== STEP 4b: Disassembly libil2cpp init_array[0] ====="
+
+if [ -f "$DE_IL2CPP" ] && command -v aarch64-linux-gnu-objdump >/dev/null 2>&1; then
+    log "--- objdump 0x801580 - 0x8016a0 ---"
+    aarch64-linux-gnu-objdump -d \
+        --start-address=0x801580 \
+        --stop-address=0x8016a0 \
+        "$DE_IL2CPP" 2>&1 | tee -a "$BUILD_LOG"
+
+    log ""
+    log "--- TLS-Check: Aufrufe an __tls_get_addr ---"
+    aarch64-linux-gnu-objdump -d \
+        --start-address=0x801580 \
+        --stop-address=0x8016a0 \
+        "$DE_IL2CPP" 2>/dev/null | grep -iE 'tls_get|tpidr_el0|mrs.*tpidr' | tee -a "$BUILD_LOG" || log "  (keine TLS-Instruktionen im Bereich)"
+
+    log ""
+    log "--- DT_FLAGS / TEXTREL in libil2cpp ---"
+    readelf -d "$DE_IL2CPP" 2>/dev/null | grep -iE 'flags|textrel|bind_now' | tee -a "$BUILD_LOG" || log "  (keine)"
+
+    log ""
+    log "--- Dynamische Symbole (nur globals) ---"
+    readelf -sW --dyn-syms "$DE_IL2CPP" 2>/dev/null | awk '$4=="FUNC" && $5=="GLOBAL"' | head -20 | tee -a "$BUILD_LOG" || true
+
+    log ""
+    log "--- Bereich um 0x80160c: benachbarte Strings ---"
+    strings -a -t x "$DE_IL2CPP" 2>/dev/null | \
+        awk '{ if (strtonum("0x" $1) >= 0x7f0000 && strtonum("0x" $1) <= 0x806000) print }' \
+        | head -30 | tee -a "$BUILD_LOG" 2>/dev/null || \
+    strings -a -t x "$DE_IL2CPP" 2>/dev/null | grep -E '^(7f|80)[0-9a-f]{4} ' | head -30 | tee -a "$BUILD_LOG" || true
+else
+    log "  [WARN] libil2cpp fehlt oder objdump nicht verfuegbar"
+fi
+
+log "===== STEP 4b fertig ====="
 
 # ------------------------------------------------------------
 # 5. JNI-Metadaten
@@ -367,48 +390,6 @@ if [ -f "$GITHUB_WS/DeadEffect.sh" ]; then
     cp "$GITHUB_WS/DeadEffect.sh" port/DeadEffect/DeadEffect.sh
     chmod +x port/DeadEffect/DeadEffect.sh
     log "[OK] DeadEffect.sh aus Repo uebernommen"
-else
-    log "[INFO] Keine DeadEffect.sh im Repo — Fallback wird benutzt"
-cat > port/DeadEffect/DeadEffect.sh <<'SHEOF'
-#!/bin/bash
-GAMEDIR="/roms/ports/DeadEffect"
-cd "$GAMEDIR"
-echo performance | sudo tee /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || true
-export LD_LIBRARY_PATH="$GAMEDIR/lib:$GAMEDIR:$LD_LIBRARY_PATH"
-export SDL_VIDEODRIVER=kmsdrm
-export SDL_AUDIODRIVER=alsa
-export SDL_ASSERT=always_ignore
-export MESA_GL_VERSION_OVERRIDE=3.2
-export MESA_GLSL_VERSION_OVERRIDE=320
-export PAN_MESA_DEBUG=gl3
-export MESA_NO_ERROR=1
-export MESA_LOADER_DRIVER_OVERRIDE=panfrost
-export HOME="$GAMEDIR/userdata"
-mkdir -p "$HOME" "$GAMEDIR/assets" "$GAMEDIR/lib"
-OBB=$(ls "$GAMEDIR"/main.*.com.bulkypix.deadeffect.obb 2>/dev/null | head -1)
-if [ -n "$OBB" ] && [ ! -d "$GAMEDIR/assets/bin/Data" ]; then
-    mkdir -p "$GAMEDIR/assets"
-    unzip -o -q "$OBB" -d "$GAMEDIR/assets" || true
-fi
-if command -v gptokeyb >/dev/null 2>&1; then
-    gptokeyb -k "deadeffect" -c "$GAMEDIR/de_wrapper.gptk" & GPID=$!
-    trap "kill $GPID 2>/dev/null" EXIT
-fi
-[ -f "$GAMEDIR/fix_libcxx.sh" ] && [ -f "$GAMEDIR/lib/libc++_shared.so" ] && \
-    bash "$GAMEDIR/fix_libcxx.sh" "$GAMEDIR/lib/libc++_shared.so" "$GAMEDIR/log.txt" || true
-stdbuf -oL -eL ./deadeffect-loader "$GAMEDIR" 2>&1 | tee "$GAMEDIR/log.txt"
-STATUS=$?
-[ -n "${GPID:-}" ] && kill "$GPID" 2>/dev/null || true
-exit $STATUS
-SHEOF
-chmod +x port/DeadEffect/DeadEffect.sh
-fi
-
-# fix_libcxx.sh ins Port-Paket (Fallback fuer das Geraet)
-if [ -f "$GITHUB_WS/fix_libcxx.sh" ]; then
-    cp "$GITHUB_WS/fix_libcxx.sh" port/DeadEffect/fix_libcxx.sh
-    chmod +x port/DeadEffect/fix_libcxx.sh
-    log "[OK] fix_libcxx.sh uebernommen"
 fi
 
 cat > port/DeadEffect/de_wrapper.gptk <<'GPTK'
