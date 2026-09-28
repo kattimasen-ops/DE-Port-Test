@@ -15,6 +15,9 @@
 #include <android/looper.h>
 #include <android/sensor.h>
 
+/* ============================================================
+ * Logging
+ * ============================================================ */
 int __android_log_print(int prio, const char *tag, const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
     fprintf(stderr, "[%s] ", tag ? tag : "?");
@@ -30,6 +33,20 @@ int __android_log_write(int prio, const char *tag, const char *s) {
     fprintf(stderr, "[%s] %s\n", tag ? tag : "?", s ? s : ""); return 0;
 }
 
+void __android_log_assert(const char *cond, const char *tag,
+                          const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    fprintf(stderr, "[ASSERT] %s: ", tag ? tag : "?");
+    vfprintf(stderr, fmt, ap);
+    fprintf(stderr, " (cond: %s)\n", cond ? cond : "?");
+    va_end(ap);
+    /* NICHT abort() aufrufen - harmlose Assertions sollen den Prozess
+     * nicht killen. */
+}
+
+/* ============================================================
+ * ANativeWindow
+ * ============================================================ */
 extern ANativeWindow *g_android_window;
 void ANativeWindow_acquire(ANativeWindow *w) { (void)w; }
 void ANativeWindow_release(ANativeWindow *w) { (void)w; }
@@ -41,7 +58,16 @@ int32_t ANativeWindow_setBuffersGeometry(ANativeWindow *w, int32_t width, int32_
     return 0;
 }
 
-/* ALooper is an opaque type in the NDK; we only ever return a fake pointer. */
+/* JNI-Variante: libunity ruft das mit (JNIEnv*, jobject surface) auf.
+ * Wir geben unseren globalen Fake-Window zurueck. */
+ANativeWindow *ANativeWindow_fromSurface(void *env, void *surface) {
+    (void)env; (void)surface;
+    return g_android_window;
+}
+
+/* ============================================================
+ * ALooper  (opaque in NDK -> Fake-Pointer)
+ * ============================================================ */
 static int g_looper_dummy;
 static ALooper *g_looper = (ALooper *)&g_looper_dummy;
 
@@ -61,7 +87,9 @@ void ALooper_wake(ALooper *l) { (void)l; }
 int ALooper_addFd(ALooper *l, int fd, int ident, int events, ALooper_callbackFunc cb, void *data) { return 1; }
 int ALooper_removeFd(ALooper *l, int fd) { return 1; }
 
-/* ASensorManager is also opaque. */
+/* ============================================================
+ * ASensor  (opaque in NDK -> Fake-Pointer)
+ * ============================================================ */
 static int g_sensor_mgr_dummy;
 static ASensorManager *g_sensor_mgr = (ASensorManager *)&g_sensor_mgr_dummy;
 
@@ -84,6 +112,9 @@ const char *ASensor_getName(ASensor const *s) { return "stub"; }
 const char *ASensor_getVendor(ASensor const *s) { return "linux"; }
 float ASensor_getResolution(ASensor const *s) { return 1.0f; }
 
+/* ============================================================
+ * System Properties
+ * ============================================================ */
 static const char *prop_get(const char *name) {
     if (!name) return "";
     if (!strcmp(name, "ro.build.version.sdk"))       return "30";
@@ -111,3 +142,26 @@ int __system_property_read(const void *pi, char *name, char *value) {
 }
 const void *__system_property_find(const char *name) { (void)name; return NULL; }
 int __system_property_set(const char *name, const char *value) { return 0; }
+
+/* ============================================================
+ * Unity-spezifische Symbole
+ * ============================================================ */
+int UnitySendMessage(const char *obj, const char *method, const char *msg) {
+    (void)obj; (void)method; (void)msg;
+    return 0;
+}
+
+/* FILE*-Array fuer stdin/stdout/stderr - libunity referenziert __sF direkt.
+ * Auf Android ist das ein Array von FILE-Structs. Wir koennen nicht
+ * einfach die glibc-Variante nutzen, weil libunity ueber Zeiger-
+ * arithmetik drauf zugreift. Ein 3-Element-Array mit den glibc FILE*s
+ * ist eine brauchbare Annaeherung. */
+extern FILE *stdin;
+extern FILE *stdout;
+extern FILE *stderr;
+FILE *__sF[3] = { NULL, NULL, NULL };  /* wird zur Laufzeit befuellt */
+
+/* Embedded dex-Datei (Unity-IL2CPP). Unity laedt daraus Java-Klassen.
+ * Ohne JVM sind das leere Dummies. */
+unsigned char _binary_classes_dex_start[1] = {0};
+unsigned char _binary_classes_dex_end[1]   = {0};
