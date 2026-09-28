@@ -225,16 +225,23 @@ else
     ( aarch64-linux-gnu-gcc -o deadeffect-loader $OBJS $LDFLAGS 2>&1 | head -100 ) | tee -a "$BUILD_LOG"
 fi
 
+# ---- NEU: Inhalts-basierte Prüfung statt Größe ----
 LOADER_OK=0
 if [ -f deadeffect-loader ]; then
     SZ=$(stat -c%s deadeffect-loader)
-    if [ "$SZ" -lt 100000 ]; then
-        log "[WARN] Loader nur $SZ Bytes — vermutlich unvollstaendig (min. 100 KB erwartet)"
-    else
+    HAS_MAIN=0
+    HAS_SL=0
+    nm -D deadeffect-loader 2>/dev/null | grep -q ' T main'           && HAS_MAIN=1
+    nm -D deadeffect-loader 2>/dev/null | grep -q ' T slCreateEngine' && HAS_SL=1
+
+    if [ "$HAS_MAIN" = "1" ] && [ "$HAS_SL" = "1" ]; then
         LOADER_OK=1
-        log "[OK] Loader gebaut ($SZ Bytes)"
+        log "[OK] Loader gebaut ($SZ Bytes) — main + slCreateEngine vorhanden"
         file deadeffect-loader | tee -a "$BUILD_LOG"
         readelf -d deadeffect-loader 2>/dev/null | grep NEEDED | tee -a "$BUILD_LOG" || true
+    else
+        log "[FEHLER] Loader fehlen Kern-Symbole (main=$HAS_MAIN, slCreateEngine=$HAS_SL)"
+        nm -D deadeffect-loader 2>/dev/null | grep -E ' T (main|slCreateEngine|so_load|jni_get_env)' | tee -a "$BUILD_LOG"
     fi
 else
     log "[FEHLER] Linken fehlgeschlagen"
@@ -254,8 +261,10 @@ mkdir -p port/DeadEffect/lib port/DeadEffect/assets
 
 if [ -f "$BUILD_SRC/deadeffect-loader" ] && [ "$LOADER_OK" = "1" ]; then
     cp "$BUILD_SRC/deadeffect-loader" port/DeadEffect/
+    log "[OK] deadeffect-loader ins Port-Paket kopiert ($(stat -c%s port/DeadEffect/deadeffect-loader) Bytes)"
 else
     printf '#!/bin/bash\necho "Loader nicht erfolgreich gebaut"\nexit 1\n' > port/DeadEffect/deadeffect-loader
+    log "[FEHLER] Fallback-Loader geschrieben — siehe oben."
 fi
 chmod +x port/DeadEffect/deadeffect-loader
 
