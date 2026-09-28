@@ -1,3 +1,4 @@
+
 #ifndef SO_UTIL_H
 #define SO_UTIL_H
 #include <stdint.h>
@@ -7,5 +8,6 @@ void  *so_load(const char *path);
 void  *so_find_addr(void *handle, const char *name);
 void   so_flush_caches(void);
 void   so_set_imports(void);
+void   so_dump_symbols(void *handle);
 
 #endif
