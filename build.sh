@@ -9,6 +9,7 @@
 #   - Wir klonen nur die Quelldateien und kompilieren sie mit
 #     unserem eigenen aarch64-linux-gnu-gcc.
 #   - GPU-Ziel: Mali-G31 (Bifrost) statt Mali-450 (Utgard).
+#   - FreeType-Header liegen unter /usr/include/freetype2/.
 # ============================================================
 set -e
 
@@ -57,6 +58,12 @@ apt-get install -y --no-install-recommends \
 echo "=== GCC ==="
 aarch64-linux-gnu-gcc --version | head -1
 
+# Zeige wo freetype-Header liegen (für Diagnose)
+echo "=== FreeType-Header-Suche ==="
+find /usr -name "ft2build.h" 2>/dev/null | head -5
+echo "=== SDL2-Header-Suche ==="
+find /usr -name "SDL.h" -path "*SDL2*" 2>/dev/null | head -5
+
 # ------------------------------------------------------------
 # 3. Native Bibliotheken herunterladen
 # ------------------------------------------------------------
@@ -68,8 +75,6 @@ find de_libs -name "*.so" -exec ls -la {} \;
 
 # ------------------------------------------------------------
 # 4. Chrono-Trigger-Loader-Quellen klonen
-#    (Nur die Quelldateien - Build erfolgt mit unserem
-#     aarch64-linux-gnu-gcc)
 # ------------------------------------------------------------
 echo "==> Klone Chrono-Trigger-Loader-Quellen"
 if ! git clone --depth=1 https://gitee.com/windstarry/portmaster_chrono.git chrono-src 2>/dev/null; then
@@ -91,7 +96,6 @@ ls -la src/ 2>/dev/null || { echo "[FEHLER] src/ nicht gefunden"; exit 1; }
 # ------------------------------------------------------------
 echo "==> Baue Loader mit aarch64-linux-gnu-gcc"
 
-# Quelldateien auflisten
 SRCS=$(ls src/*.c 2>/dev/null)
 if [ -z "$SRCS" ]; then
     echo "[FEHLER] Keine Quelldateien in src/ gefunden"
@@ -100,34 +104,45 @@ fi
 echo "Gefundene Quelldateien:"
 echo "$SRCS"
 
-# Compiler-Flags (angepasst an Mali-G31 statt Mali-450)
+# ------------------------------------------------------------
+# 5a. Compiler-Flags (mit korrekten Include-Pfaden)
+# ------------------------------------------------------------
 CFLAGS="-D_GNU_SOURCE -O2 -fPIC -fno-omit-frame-pointer -rdynamic"
 CFLAGS="$CFLAGS -Wno-int-conversion -Wno-incompatible-pointer-types"
 CFLAGS="$CFLAGS -Wno-implicit-function-declaration -Wno-pointer-sign"
+CFLAGS="$CFLAGS -Wno-deprecated-declarations"
 CFLAGS="$CFLAGS -I src"
-CFLAGS="$CFLAGS -I /usr/aarch64-linux-gnu/include"
-CFLAGS="$CFLAGS -I /usr/aarch64-linux-gnu/include/SDL2"
-CFLAGS="$CFLAGS -I /usr/aarch64-linux-gnu/include/freetype2"
 
-# Linker-Flags
-LDFLAGS="-lSDL2 -lGLESv2 -lEGL -lfreetype -ldl -lm -lpthread -lstdc++ -lgcc_s"
+# Header-Pfade dynamisch suchen (robust gegen Ubuntu-Versionen)
+for inc in \
+    "/usr/aarch64-linux-gnu/include" \
+    "/usr/aarch64-linux-gnu/include/SDL2" \
+    "/usr/include/SDL2" \
+    "/usr/include/freetype2" \
+    "/usr/aarch64-linux-gnu/include/freetype2" \
+    "/usr/include/aarch64-linux-gnu/freetype2" \
+    "/usr/include/libxml2"; do
+    if [ -d "$inc" ]; then
+        CFLAGS="$CFLAGS -I $inc"
+        echo "[OK] Include: $inc"
+    fi
+done
 
-# Build
+# Bibliotheks-Pfade
+LDFLAGS="-L/usr/aarch64-linux-gnu/lib"
+LDFLAGS="$LDFLAGS -lSDL2 -lGLESv2 -lEGL -lfreetype -ldl -lm -lpthread -lstdc++ -lgcc_s"
+
+# ------------------------------------------------------------
+# 5b. Build
+# ------------------------------------------------------------
+echo "==> Kompiliere $SRCS"
 set +e
 aarch64-linux-gnu-gcc $CFLAGS -o chrono $SRCS $LDFLAGS 2>&1 | tail -40
 BUILD_STATUS=${PIPESTATUS[0]}
 set -e
 
-# Prüfen
 if [ ! -f chrono ] || [ "$BUILD_STATUS" -ne 0 ]; then
     echo "[FEHLER] Loader-Binary wurde nicht erstellt (Status: $BUILD_STATUS)"
-    echo "=== Debug-Info ==="
-    ls -la
-    echo "=== Versuche Einzeldatei-Kompilierung zur Diagnose ==="
-    for src in $SRCS; do
-        echo "--- Kompiliere: $src ---"
-        aarch64-linux-gnu-gcc $CFLAGS -c "$src" -o /tmp/test.o 2>&1 | head -5
-    done
     exit 1
 fi
 
@@ -140,16 +155,12 @@ ls -la chrono
 # ------------------------------------------------------------
 echo "==> Passe Loader für Dead Effect an"
 
-# main.c: Bibliotheksnamen tauschen
 sed -i 's/libchrono\.so/libmain.so/g' src/main.c 2>/dev/null || true
 sed -i 's/libc++_shared\.so/libunity.so/g' src/main.c 2>/dev/null || true
 sed -i 's/libencrypt\.so/libil2cpp.so/g' src/main.c 2>/dev/null || true
-
-# Package-Name tauschen
 sed -i 's/com\.square_enix\.android_googleplay\.chrono_trigger/com.bulkypix.deadeffect/g' \
     src/*.c src/*.h 2>/dev/null || true
 
-# Neu bauen mit angepassten Quellen
 echo "==> Baue Loader mit Dead-Effect-Anpassungen neu"
 set +e
 aarch64-linux-gnu-gcc $CFLAGS -o chrono $SRCS $LDFLAGS 2>&1 | tail -20
@@ -174,14 +185,11 @@ rm -rf port
 mkdir -p port/DeadEffect/lib
 mkdir -p port/DeadEffect/assets
 
-# Loader umbenennen
 cp chrono-src/chrono/chrono port/DeadEffect/deadeffect-loader
 chmod +x port/DeadEffect/deadeffect-loader
 
-# Dead Effect native libs
 cp de_libs/arm64-v8a/*.so port/DeadEffect/lib/ 2>/dev/null || true
 
-# Startscript
 if [ -f /work/start.sh ]; then
     cp /work/start.sh port/DeadEffect/DeadEffect.sh
     chmod +x port/DeadEffect/DeadEffect.sh
@@ -197,7 +205,6 @@ LAUNCHER
     chmod +x port/DeadEffect/DeadEffect.sh
 fi
 
-# gptk-Datei
 if [ -f /work/de_wrapper.gptk ]; then
     cp /work/de_wrapper.gptk port/DeadEffect/
 fi
