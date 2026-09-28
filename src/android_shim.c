@@ -8,6 +8,8 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
+#include <sys/select.h>
 #include <time.h>
 #include <pthread.h>
 #include <android/log.h>
@@ -32,7 +34,6 @@ int __android_log_vprint(int prio, const char *tag, const char *fmt, va_list ap)
 int __android_log_write(int prio, const char *tag, const char *s) {
     fprintf(stderr, "[%s] %s\n", tag ? tag : "?", s ? s : ""); return 0;
 }
-
 void __android_log_assert(const char *cond, const char *tag,
                           const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
@@ -40,8 +41,10 @@ void __android_log_assert(const char *cond, const char *tag,
     vfprintf(stderr, fmt, ap);
     fprintf(stderr, " (cond: %s)\n", cond ? cond : "?");
     va_end(ap);
-    /* NICHT abort() aufrufen - harmlose Assertions sollen den Prozess
-     * nicht killen. */
+    /* Nicht abort() — harmlose Assertions sollen den Loader nicht killen */
+}
+void android_set_abort_message(const char *msg) {
+    fprintf(stderr, "[android_abort] %s\n", msg ? msg : "(null)");
 }
 
 /* ============================================================
@@ -57,16 +60,13 @@ int32_t ANativeWindow_setBuffersGeometry(ANativeWindow *w, int32_t width, int32_
     if (w) { w->width = width; w->height = height; w->format = format; }
     return 0;
 }
-
-/* JNI-Variante: libunity ruft das mit (JNIEnv*, jobject surface) auf.
- * Wir geben unseren globalen Fake-Window zurueck. */
 ANativeWindow *ANativeWindow_fromSurface(void *env, void *surface) {
     (void)env; (void)surface;
     return g_android_window;
 }
 
 /* ============================================================
- * ALooper  (opaque in NDK -> Fake-Pointer)
+ * ALooper (opaque in NDK -> Fake-Pointer)
  * ============================================================ */
 static int g_looper_dummy;
 static ALooper *g_looper = (ALooper *)&g_looper_dummy;
@@ -88,7 +88,7 @@ int ALooper_addFd(ALooper *l, int fd, int ident, int events, ALooper_callbackFun
 int ALooper_removeFd(ALooper *l, int fd) { return 1; }
 
 /* ============================================================
- * ASensor  (opaque in NDK -> Fake-Pointer)
+ * ASensor (opaque in NDK -> Fake-Pointer)
  * ============================================================ */
 static int g_sensor_mgr_dummy;
 static ASensorManager *g_sensor_mgr = (ASensorManager *)&g_sensor_mgr_dummy;
@@ -151,17 +151,89 @@ int UnitySendMessage(const char *obj, const char *method, const char *msg) {
     return 0;
 }
 
-/* FILE*-Array fuer stdin/stdout/stderr - libunity referenziert __sF direkt.
- * Auf Android ist das ein Array von FILE-Structs. Wir koennen nicht
- * einfach die glibc-Variante nutzen, weil libunity ueber Zeiger-
- * arithmetik drauf zugreift. Ein 3-Element-Array mit den glibc FILE*s
- * ist eine brauchbare Annaeherung. */
-extern FILE *stdin;
-extern FILE *stdout;
-extern FILE *stderr;
-FILE *__sF[3] = { NULL, NULL, NULL };  /* wird zur Laufzeit befuellt */
+/* FILE*-Array fuer stdin/stdout/stderr - libunity referenziert __sF direkt. */
+FILE *__sF[3] = { NULL, NULL, NULL };
 
-/* Embedded dex-Datei (Unity-IL2CPP). Unity laedt daraus Java-Klassen.
- * Ohne JVM sind das leere Dummies. */
+/* Embedded dex-Datei (Unity-IL2CPP). Leere Dummies ohne JVM. */
 unsigned char _binary_classes_dex_start[1] = {0};
 unsigned char _binary_classes_dex_end[1]   = {0};
+
+/* ============================================================
+ * Libc-Kompatibilitaet (Bionic != glibc)
+ * ============================================================ */
+
+/* ----- stat / lstat / fstat ----------------------------------
+ * glibc aarch64 exportiert stat/lstat/fstat nicht direkt als
+ * dynamische Symbole (sie werden via __xstat oder direktem
+ * Syscall gemacht). Wir gehen auf den Syscall durch. */
+
+#ifndef SYS_newfstatat
+#define SYS_newfstatat 262
+#endif
+#ifndef SYS_fstat
+#define SYS_fstat 80
+#endif
+#ifndef AT_FDCWD
+#define AT_FDCWD -100
+#endif
+#ifndef AT_SYMLINK_NOFOLLOW
+#define AT_SYMLINK_NOFOLLOW 0x100
+#endif
+
+/* Forward-Deklarationen; in sys/stat.h sind sie teils als
+ * __REDIRECT-Makros deklariert. Wir nehmen die Header-Deklaration
+ * hin, definieren aber neue Symbole. */
+int stat(const char *path, struct stat *buf) {
+    return (int)syscall(SYS_newfstatat, AT_FDCWD, path, buf, 0);
+}
+int lstat(const char *path, struct stat *buf) {
+    return (int)syscall(SYS_newfstatat, AT_FDCWD, path, buf,
+                        AT_SYMLINK_NOFOLLOW);
+}
+int fstat(int fd, struct stat *buf) {
+    return (int)syscall(SYS_fstat, fd, buf);
+}
+
+/* ----- __errno ----------------------------------------------
+ * Bionic: errno ist *__errno(). glibc: *__errno_location(). */
+extern int *__errno_location(void);
+int *__errno(void) {
+    return __errno_location();
+}
+
+/* ----- strlcpy ----------------------------------------------
+ * BSD-Funktion, in glibc nicht enthalten. */
+size_t strlcpy(char *dst, const char *src, size_t size) {
+    size_t srclen = strlen(src);
+    if (size > 0) {
+        size_t copylen = (srclen >= size) ? size - 1 : srclen;
+        memcpy(dst, src, copylen);
+        dst[copylen] = '\0';
+    }
+    return srclen;
+}
+
+/* ----- __FD_SET_chk / __FD_ISSET_chk ------------------------
+ * Fortify-Varianten, die Bionic-Code importiert. */
+void __FD_SET_chk(int fd, fd_set *set, size_t set_size) {
+    (void)set_size;
+    if (fd >= 0 && fd < FD_SETSIZE && set) FD_SET(fd, set);
+}
+int __FD_ISSET_chk(int fd, const fd_set *set, size_t set_size) {
+    (void)set_size;
+    if (fd >= 0 && fd < FD_SETSIZE && set) return FD_ISSET(fd, set);
+    return 0;
+}
+
+/* ----- pthread_atfork ---------------------------------------
+ * Liegt in libpthread.so.0, wird aber aus dem Bionic-Code
+ * nicht zuverlaessig gefunden. Wir leiten an glibc weiter. */
+extern int __register_atfork(void (*prepare)(void),
+                             void (*parent)(void),
+                             void (*child)(void),
+                             void *dso_handle);
+int pthread_atfork(void (*prepare)(void),
+                   void (*parent)(void),
+                   void (*child)(void)) {
+    return __register_atfork(prepare, parent, child, NULL);
+}
