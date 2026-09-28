@@ -1,13 +1,11 @@
 #!/bin/bash
 # ============================================================
-# Dead Effect Wrapper - Cross-Compile fuer RK3326 / ARM64
-# Laeuft im ubuntu:20.04 Container (GLIBC 2.31)
+# Dead Effect Port - Build mit Bogodroid-Framework
+# (droidports + libjnivm + mcpelauncher-linker)
 #
-# WICHTIG:
-#   - mcpelauncher-linker MUSS mit Clang gebaut werden (AOSP
-#     ist Clang-only, GCC scheitert an C11 _Atomic).
-#   - Clang braucht den GCC-C++-Include-Pfad fuer bits/c++config.h.
-#   - Der Wrapper wird mit GCC + LTO + Cortex-A35 gebaut.
+# Neue Technik: Wir bauen NICHT unseren eigenen Wrapper,
+# sondern verwenden das Bogodroid-Framework, das einen
+# fertigen unityloader fuer Unity-Spiele mitbringt.
 # ============================================================
 set -e
 
@@ -45,6 +43,7 @@ apt-get install -y --no-install-recommends \
   crossbuild-essential-arm64 \
   clang-12 lld-12 llvm-12 \
   libc6-dev-arm64-cross \
+  libzip-dev:arm64 \
   libasound2-dev:arm64 \
   libpulse-dev:arm64 \
   libegl1-mesa-dev:arm64 \
@@ -64,18 +63,31 @@ clang-12 --version | head -1
 echo "==> Lade Dead Effect native libs"
 wget -q -O arm64-v8a.zip "$DE_LIBS_URL"
 unzip -o arm64-v8a.zip -d de_libs/
-echo "=== Enthaltene Bibliotheken ==="
 find de_libs -name "*.so" -exec ls -la {} \;
 
 # ------------------------------------------------------------
-# 4. mcpelauncher-linker mit CLANG bauen
-#    FIX: Clang braucht den GCC-C++-Include-Pfad fuer
-#    bits/c++config.h. Dieser liegt unter
-#    /usr/aarch64-linux-gnu/include/c++/9/aarch64-linux-gnu
+# 4. Bogodroid-Framework klonen
+#    Enthaelt: droidports + libjnivm + mcpelauncher-linker
 # ------------------------------------------------------------
-echo "==> Baue mcpelauncher-linker mit Clang"
+echo "==> Klone Bogodroid-Framework"
+git clone --depth=1 --recursive https://github.com/binarycounter/bogodroid.git
+cd bogodroid
 
-# Include-Pfad ermitteln (verschiedene GCC-Versionen moeglich)
+# Submodule initialisieren (libjnivm, mcpelauncher-linker, etc.)
+git submodule update --init --recursive
+
+echo "=== Bogodroid-Struktur ==="
+ls -la
+echo "=== libjnivm ==="
+ls -la libjnivm/ 2>/dev/null || echo "libjnivm nicht gefunden"
+
+# ------------------------------------------------------------
+# 5. libjnivm mit Clang bauen
+#    (fuer Cross-Compile nach aarch64)
+# ------------------------------------------------------------
+echo "==> Baue libjnivm"
+
+# GCC-C++-Include-Pfad fuer Clang ermitteln
 GCC_CXX_INCLUDE=""
 for ver in 9 10 11 12; do
     if [ -d "/usr/aarch64-linux-gnu/include/c++/$ver/aarch64-linux-gnu" ]; then
@@ -84,121 +96,100 @@ for ver in 9 10 11 12; do
     fi
 done
 
-if [ -z "$GCC_CXX_INCLUDE" ]; then
-    echo "[FEHLER] GCC-C++-Include-Pfad nicht gefunden!"
-    echo "Verfuegbare Pfade:"
-    ls -la /usr/aarch64-linux-gnu/include/c++/ 2>/dev/null || true
-    exit 1
-fi
-echo "[OK] GCC-C++-Include: $GCC_CXX_INCLUDE"
+# Toolchain-File fuer Cross-Compile erstellen
+cat > /tmp/aarch64-toolchain.cmake <<TOOLCHAIN_EOF
+set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR aarch64)
+set(CMAKE_C_COMPILER clang-12)
+set(CMAKE_C_COMPILER_TARGET aarch64-linux-gnu)
+set(CMAKE_CXX_COMPILER clang++-12)
+set(CMAKE_CXX_COMPILER_TARGET aarch64-linux-gnu)
+set(CMAKE_FIND_ROOT_PATH /usr/aarch64-linux-gnu)
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+TOOLCHAIN_EOF
 
-LINKER_BUILT=0
-if git clone --depth=1 --recursive https://github.com/minecraft-linux/mcpelauncher-linker.git 2>/dev/null; then
-    cd mcpelauncher-linker
-    mkdir -p build && cd build
-
-    cmake .. \
-      -DCMAKE_C_COMPILER=clang-12 \
-      -DCMAKE_C_COMPILER_TARGET=aarch64-linux-gnu \
-      -DCMAKE_CXX_COMPILER=clang++-12 \
-      -DCMAKE_CXX_COMPILER_TARGET=aarch64-linux-gnu \
-      -DCMAKE_SYSTEM_NAME=Linux \
-      -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-      -DCMAKE_BUILD_TYPE=Release \
-      -DBUILD_SHARED_LIBS=ON \
-      -DCMAKE_C_FLAGS="-isystem $GCC_CXX_INCLUDE" \
-      -DCMAKE_CXX_FLAGS="-isystem $GCC_CXX_INCLUDE" \
-      -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld-12" \
-      -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld-12"
-
-    make -j$(nproc)
-    cd ../..
-    echo "[OK] mcpelauncher-linker mit Clang gebaut"
-    LINKER_BUILT=1
-else
-    echo "[WARN] mcpelauncher-linker konnte nicht geklont werden"
-fi
-
-# ------------------------------------------------------------
-# 5. Wrapper mit GCC + LTO + Cortex-A35 bauen
-# ------------------------------------------------------------
-echo "==> Baue DE Wrapper mit GCC + LTO + Cortex-A35"
-rm -rf build_aarch64 output
-mkdir -p build_aarch64 output
-
-cmake -B build_aarch64 \
-  -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
-  -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
-  -DCMAKE_SYSTEM_NAME=Linux \
-  -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+# libjnivm bauen
+mkdir -p libjnivm/build && cd libjnivm/build
+cmake .. \
+  -DCMAKE_TOOLCHAIN_FILE=/tmp/aarch64-toolchain.cmake \
   -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_C_COMPILER_AR=aarch64-linux-gnu-gcc-ar \
-  -DCMAKE_C_COMPILER_RANLIB=aarch64-linux-gnu-gcc-ranlib \
-  -DCMAKE_CXX_COMPILER_AR=aarch64-linux-gnu-gcc-ar \
-  -DCMAKE_CXX_COMPILER_RANLIB=aarch64-linux-gnu-gcc-ranlib
-
-cmake --build build_aarch64 -j$(nproc)
-
-cp build_aarch64/de_wrapper output/
-echo "=== Wrapper-Info ==="
-file output/de_wrapper
-readelf -p .comment output/de_wrapper 2>/dev/null | head -5
-ls -la output/
+  -DJNIVM_ENABLE_TRACE=ON \
+  -DJNIVM_ENABLE_GC=ON \
+  -DJNIVM_ENABLE_DEBUG=ON \
+  -DJNIVM_USE_FAKE_JNI_CODEGEN=ON \
+  -DCMAKE_C_FLAGS="-isystem $GCC_CXX_INCLUDE" \
+  -DCMAKE_CXX_FLAGS="-isystem $GCC_CXX_INCLUDE"
+make -j$(nproc)
+cd ../..
+echo "[OK] libjnivm gebaut"
 
 # ------------------------------------------------------------
-# 6. Port-Paket schnueren (mit start.sh + gptk)
+# 6. Bogodroid-Wrapper (unityloader) bauen
+#    WICHTIG: unityloader ist der fertige Loader fuer Unity-
+#    Spiele. Er nutzt droidports (ELF-Loader) + libjnivm (JNI).
+# ------------------------------------------------------------
+echo "==> Baue unityloader"
+mkdir -p build && cd build
+cmake .. \
+  -DCMAKE_TOOLCHAIN_FILE=/tmp/aarch64-toolchain.cmake \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DPROJ=unityloader \
+  -DCMAKE_C_FLAGS="-isystem $GCC_CXX_INCLUDE" \
+  -DCMAKE_CXX_FLAGS="-isystem $GCC_CXX_INCLUDE"
+make -j$(nproc)
+cd ..
+echo "[OK] unityloader gebaut"
+
+# Suchen wo das Binary liegt
+UNITYLOADER_BIN=$(find . -name "unityloader" -type f -executable | head -n1)
+echo "[OK] unityloader: $UNITYLOADER_BIN"
+file "$UNITYLOADER_BIN"
+
+# ------------------------------------------------------------
+# 7. Port-Paket schnueren
 # ------------------------------------------------------------
 echo "==> Erstelle Port-Paket"
+cd /work
 rm -rf port
 mkdir -p port/DeadEffect/lib
+mkdir -p port/DeadEffect/gamefiles/unity
 
-cp output/de_wrapper port/DeadEffect/
+# unityloader ins Port-Verzeichnis
+cp "bogodroid/$UNITYLOADER_BIN" port/DeadEffect/unityloader
+chmod +x port/DeadEffect/unityloader
 
-if [ -d de_libs/arm64-v8a ]; then
-    cp de_libs/arm64-v8a/*.so port/DeadEffect/lib/ 2>/dev/null || true
-else
-    cp de_libs/*.so port/DeadEffect/lib/ 2>/dev/null || true
-fi
+# Dead Effect native libs
+cp de_libs/arm64-v8a/*.so port/DeadEffect/lib/ 2>/dev/null || true
 
-if [ "$LINKER_BUILT" = "1" ]; then
-    find mcpelauncher-linker/build -name "*.so*" -exec cp {} port/DeadEffect/lib/ \; 2>/dev/null || true
-fi
+# libjnivm + mcpelauncher-linker Libs
+find bogodroid -name "libjnivm*.so*" -exec cp {} port/DeadEffect/lib/ \; 2>/dev/null || true
+find bogodroid -name "libmcpelauncher-linker*.so*" -exec cp {} port/DeadEffect/lib/ \; 2>/dev/null || true
 
-# start.sh aus dem Repo kopieren (PortMaster-integriert)
-if [ -f /work/start.sh ]; then
-    cp /work/start.sh port/DeadEffect/DeadEffect.sh
-    chmod +x port/DeadEffect/DeadEffect.sh
-else
-    echo "[WARN] start.sh nicht gefunden – erstelle Fallback"
-    cat > port/DeadEffect/DeadEffect.sh << 'LAUNCHER'
-#!/bin/bash
-cd "$(dirname "$0")"
-export LD_LIBRARY_PATH="./lib:$LD_LIBRARY_PATH"
-export SDL_AUDIODRIVER=alsa
-chmod +x de_wrapper
-exec ./de_wrapper "$@"
-LAUNCHER
-    chmod +x port/DeadEffect/DeadEffect.sh
-fi
+# Startscript + TOML-Config
+cp /work/start.sh port/DeadEffect/DeadEffect.sh 2>/dev/null || true
+cp /work/de_wrapper.gptk port/DeadEffect/ 2>/dev/null || true
+cp /work/configs/unity.toml port/DeadEffect/gamefiles/unity/ 2>/dev/null || true
 
-# gptk-Datei kopieren
-if [ -f /work/de_wrapper.gptk ]; then
-    cp /work/de_wrapper.gptk port/DeadEffect/
-fi
+chmod +x port/DeadEffect/DeadEffect.sh 2>/dev/null || true
 
 cat > port/DeadEffect/README.txt << 'READMEEOF'
-Dead Effect - Native Wrapper fuer M9 Pro / R36S
-================================================
+Dead Effect - PortMaster-Port (Bogodroid-Framework)
+====================================================
 
-Build: Cortex-A35 + LTO + O3 optimiert (Wrapper mit GCC)
-Linker: mcpelauncher-linker (mit Clang-12 gebaut)
-GLIBC: 2.31 (kompatibel mit ArkOS)
+Technik: unityloader (droidports + libjnivm + mcpelauncher-linker)
 
 Installation:
 1. Kopiere den Ordner "DeadEffect" nach /roms/ports/
-2. Kopiere deine Dead Effect OBB-Daten nach:
-   /roms/ports/DeadEffect/assets/
-3. Starte ueber EmulationStation > Ports > Dead Effect
+2. Kopiere deine Dead Effect .so-Dateien nach:
+   /roms/ports/DeadEffect/lib/
+3. Kopiere deine OBB-Assets nach:
+   /roms/ports/DeadEffect/gamefiles/unity/assets/
+4. Starte ueber EmulationStation > Ports > Dead Effect
+
+Log: /roms/ports/DeadEffect/log.txt
 READMEEOF
 
 cd port && zip -r ../DeadEffect-Port.zip . > /dev/null
