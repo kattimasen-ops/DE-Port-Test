@@ -1,0 +1,147 @@
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <dlfcn.h>
+#include <SDL2/SDL.h>
+#include <EGL/egl.h>
+#include <GLES2/gl2.h>
+#include <android/log.h>
+#include <android/native_window.h>
+#include "so_util.h"
+#include "jni_shim.h"
+
+#define TAG "deadeffect"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+
+#ifndef DEAD_EFFECT_LIBDIR
+#define DEAD_EFFECT_LIBDIR "/roms/ports/DeadEffect/lib"
+#endif
+#ifndef DEAD_EFFECT_ASSETS
+#define DEAD_EFFECT_ASSETS "/roms/ports/DeadEffect/assets"
+#endif
+
+ANativeWindow *g_android_window = NULL;
+void *g_libmain_handle = NULL;
+
+typedef unsigned int (*JNI_OnLoad_t)(void *, void *);
+typedef void  (*UnityPlayer_initJni_t)(void *, void *, void *);
+typedef unsigned char (*UnityPlayer_nativeRender_t)(void *, void *, long long, int, int);
+typedef void  (*UnityPlayer_nativePause_t)(void *, void *);
+
+static UnityPlayer_initJni_t      unity_init_jni       = NULL;
+static UnityPlayer_nativeRender_t unity_native_render  = NULL;
+static UnityPlayer_nativePause_t  unity_native_pause   = NULL;
+
+static SDL_Window   *sdl_win = NULL;
+static SDL_GLContext sdl_ctx = NULL;
+static EGLDisplay    egl_dpy = EGL_NO_DISPLAY;
+static EGLSurface    egl_surf = EGL_NO_SURFACE;
+static EGLContext    egl_ctx = EGL_NO_CONTEXT;
+
+static int video_init(void) {
+    if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) < 0) {
+        LOGE("SDL_InitSubSystem: %s", SDL_GetError()); return -1;
+    }
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+    sdl_win = SDL_CreateWindow("Dead Effect",
+        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 640, 480,
+        SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN);
+    if (!sdl_win) { LOGE("SDL_CreateWindow: %s", SDL_GetError()); return -1; }
+    sdl_ctx = SDL_GL_CreateContext(sdl_win);
+    if (!sdl_ctx) { LOGE("SDL_GL_CreateContext: %s", SDL_GetError()); return -1; }
+    SDL_GL_SetSwapInterval(1);
+    egl_dpy  = eglGetCurrentDisplay();
+    egl_surf = eglGetCurrentSurface(EGL_DRAW);
+    egl_ctx  = eglGetCurrentContext();
+    LOGI("EGL: dpy=%p surf=%p ctx=%p", egl_dpy, egl_surf, egl_ctx);
+    LOGI("GL_VERSION: %s", glGetString(GL_VERSION));
+    LOGI("GL_RENDERER: %s", glGetString(GL_RENDERER));
+    g_android_window = calloc(1, sizeof(ANativeWindow));
+    g_android_window->width  = 640;
+    g_android_window->height = 480;
+    g_android_window->format = 1;
+    return 0;
+}
+
+static int load_module_chain(void) {
+    char path[512];
+
+    /* 1. libmain.so */
+    snprintf(path, sizeof(path), "%s/libmain.so", DEAD_EFFECT_LIBDIR);
+    g_libmain_handle = so_load(path);
+    if (!g_libmain_handle) { LOGE("libmain.so laden fehlgeschlagen"); return -1; }
+    LOGI("libmain.so geladen");
+
+    /* 2. NativeLoader.load(libdir) — durch jni_shim */
+    if (jni_call_native_loader("com/unity3d/player/NativeLoader",
+                               "load", DEAD_EFFECT_LIBDIR) != 0) {
+        LOGE("NativeLoader.load() fehlgeschlagen");
+        return -1;
+    }
+    LOGI("NativeLoader.load(%s) OK", DEAD_EFFECT_LIBDIR);
+
+    /* 3. libunity.so */
+    snprintf(path, sizeof(path), "%s/libunity.so", DEAD_EFFECT_LIBDIR);
+    void *libunity_h = so_load(path);
+    if (!libunity_h) { LOGE("libunity.so laden fehlgeschlagen"); return -1; }
+    unity_init_jni      = (UnityPlayer_initJni_t)      so_find_addr(libunity_h, "UnityPlayer_initJni");
+    unity_native_render = (UnityPlayer_nativeRender_t) so_find_addr(libunity_h, "UnityPlayer_nativeRender");
+    unity_native_pause  = (UnityPlayer_nativePause_t)  so_find_addr(libunity_h, "UnityPlayer_nativePause");
+    LOGI("libunity.so geladen; initJni=%p render=%p",
+         unity_init_jni, unity_native_render);
+
+    /* 4. UnityPlayer.initJni(context) */
+    if (unity_init_jni) {
+        void *env = jni_get_env();
+        void *fake_ctx = jni_make_fake_context();
+        LOGI("Rufe UnityPlayer.initJni()");
+        unity_init_jni(env, NULL, fake_ctx);
+    }
+
+    /* 5. libil2cpp.so */
+    snprintf(path, sizeof(path), "%s/libil2cpp.so", DEAD_EFFECT_LIBDIR);
+    void *libil2cpp_h = so_load(path);
+    if (!libil2cpp_h) { LOGE("libil2cpp.so laden fehlgeschlagen"); return -1; }
+    LOGI("libil2cpp.so geladen");
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    LOGI("Dead Effect Loader startet");
+    LOGI("  libdir = %s", DEAD_EFFECT_LIBDIR);
+    LOGI("  assets = %s", DEAD_EFFECT_ASSETS);
+
+    jni_shim_init();
+    if (video_init() != 0) return 1;
+    if (load_module_chain() != 0) return 1;
+
+    jni_shim_set_egl(egl_dpy, egl_surf, egl_ctx);
+
+    int running = 1;
+    void *env = jni_get_env();
+    while (running) {
+        SDL_Event ev;
+        while (SDL_PollEvent(&ev)) {
+            if (ev.type == SDL_QUIT) running = 0;
+            if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE) running = 0;
+            jni_shim_handle_sdl_event(&ev);
+        }
+        if (unity_native_render && env) {
+            unity_native_render(env, NULL, (long long)SDL_GetTicks(), 640, 480);
+        }
+        SDL_GL_SwapWindow(sdl_win);
+    }
+    if (unity_native_pause && env) unity_native_pause(env, NULL);
+    LOGI("Loader beendet");
+    return 0;
+}
