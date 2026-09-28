@@ -41,7 +41,6 @@ void __android_log_assert(const char *cond, const char *tag,
     vfprintf(stderr, fmt, ap);
     fprintf(stderr, " (cond: %s)\n", cond ? cond : "?");
     va_end(ap);
-    /* Nicht abort() — harmlose Assertions sollen den Loader nicht killen */
 }
 void android_set_abort_message(const char *msg) {
     fprintf(stderr, "[android_abort] %s\n", msg ? msg : "(null)");
@@ -151,28 +150,23 @@ int UnitySendMessage(const char *obj, const char *method, const char *msg) {
     return 0;
 }
 
-/* FILE*-Array fuer stdin/stdout/stderr - libunity referenziert __sF direkt. */
 FILE *__sF[3] = { NULL, NULL, NULL };
-
-/* Embedded dex-Datei (Unity-IL2CPP). Leere Dummies ohne JVM. */
 unsigned char _binary_classes_dex_start[1] = {0};
 unsigned char _binary_classes_dex_end[1]   = {0};
 
 /* ============================================================
  * Libc-Kompatibilitaet (Bionic != glibc)
+ *
+ * WICHTIG: aarch64 Syscall-Nummern weichen von x86_64 ab!
+ *   - newfstatat:  ARM64 = 79, x86_64 = 262
+ *   - fstat:       ARM64 = 80, x86_64 = 5
+ * Wir benutzen die ARM64-Werte direkt, weil dieser Code
+ * auf einem ARM64-Gerät läuft.
  * ============================================================ */
 
-/* ----- stat / lstat / fstat ----------------------------------
- * glibc aarch64 exportiert stat/lstat/fstat nicht direkt als
- * dynamische Symbole (sie werden via __xstat oder direktem
- * Syscall gemacht). Wir gehen auf den Syscall durch. */
+#define AARCH64_SYS_newfstatat 79
+#define AARCH64_SYS_fstat      80
 
-#ifndef SYS_newfstatat
-#define SYS_newfstatat 262
-#endif
-#ifndef SYS_fstat
-#define SYS_fstat 80
-#endif
 #ifndef AT_FDCWD
 #define AT_FDCWD -100
 #endif
@@ -180,29 +174,25 @@ unsigned char _binary_classes_dex_end[1]   = {0};
 #define AT_SYMLINK_NOFOLLOW 0x100
 #endif
 
-/* Forward-Deklarationen; in sys/stat.h sind sie teils als
- * __REDIRECT-Makros deklariert. Wir nehmen die Header-Deklaration
- * hin, definieren aber neue Symbole. */
+/* ----- stat / lstat / fstat ---------------------------------- */
 int stat(const char *path, struct stat *buf) {
-    return (int)syscall(SYS_newfstatat, AT_FDCWD, path, buf, 0);
+    return (int)syscall(AARCH64_SYS_newfstatat, AT_FDCWD, path, buf, 0);
 }
 int lstat(const char *path, struct stat *buf) {
-    return (int)syscall(SYS_newfstatat, AT_FDCWD, path, buf,
+    return (int)syscall(AARCH64_SYS_newfstatat, AT_FDCWD, path, buf,
                         AT_SYMLINK_NOFOLLOW);
 }
 int fstat(int fd, struct stat *buf) {
-    return (int)syscall(SYS_fstat, fd, buf);
+    return (int)syscall(AARCH64_SYS_fstat, fd, buf);
 }
 
-/* ----- __errno ----------------------------------------------
- * Bionic: errno ist *__errno(). glibc: *__errno_location(). */
+/* ----- __errno ---------------------------------------------- */
 extern int *__errno_location(void);
 int *__errno(void) {
     return __errno_location();
 }
 
-/* ----- strlcpy ----------------------------------------------
- * BSD-Funktion, in glibc nicht enthalten. */
+/* ----- strlcpy ---------------------------------------------- */
 size_t strlcpy(char *dst, const char *src, size_t size) {
     size_t srclen = strlen(src);
     if (size > 0) {
@@ -213,8 +203,7 @@ size_t strlcpy(char *dst, const char *src, size_t size) {
     return srclen;
 }
 
-/* ----- __FD_SET_chk / __FD_ISSET_chk ------------------------
- * Fortify-Varianten, die Bionic-Code importiert. */
+/* ----- __FD_SET_chk / __FD_ISSET_chk ------------------------ */
 void __FD_SET_chk(int fd, fd_set *set, size_t set_size) {
     (void)set_size;
     if (fd >= 0 && fd < FD_SETSIZE && set) FD_SET(fd, set);
@@ -225,9 +214,7 @@ int __FD_ISSET_chk(int fd, const fd_set *set, size_t set_size) {
     return 0;
 }
 
-/* ----- pthread_atfork ---------------------------------------
- * Liegt in libpthread.so.0, wird aber aus dem Bionic-Code
- * nicht zuverlaessig gefunden. Wir leiten an glibc weiter. */
+/* ----- pthread_atfork --------------------------------------- */
 extern int __register_atfork(void (*prepare)(void),
                              void (*parent)(void),
                              void (*child)(void),
