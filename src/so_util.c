@@ -40,11 +40,11 @@ static int g_nmods = 0;
 static void *resolve_symbol(const char *name) {
     void *p = dlsym(RTLD_DEFAULT, name);
     if (p) return p;
-    static void *sys_libs[8] = {0};
+    static void *sys_libs[10] = {0};
     static const char *sys_names[] = {
+        "libc.so.6", "libm.so.6", "libdl.so.2", "libpthread.so.0",
         "libEGL.so.1", "libGLESv2.so.2", "libGLESv1_CM.so.1",
-        "libSDL2-2.0.so.0", "libz.so.1", "libm.so.6",
-        "libdl.so.2", "libpthread.so.0"
+        "libSDL2-2.0.so.0", "libz.so.1", "libstdc++.so.6"
     };
     for (size_t i = 0; i < sizeof(sys_names)/sizeof(*sys_names); i++) {
         if (!sys_libs[i]) sys_libs[i] = dlopen(sys_names[i], RTLD_NOW | RTLD_GLOBAL);
@@ -169,6 +169,7 @@ void *so_load(const char *path) {
     if (rela_ent) m->relacount = rela_sz / rela_ent;
     m->jmprelcount = jmprel_sz / sizeof(Elf64_Rela);
 
+    /* Symbol count: prefer SysV hash, else GNU hash, else 65536 (upper bound). */
     if (sysv_hash) {
         m->symcount = sysv_hash[1];
     } else if (gnu_hash) {
