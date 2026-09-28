@@ -1,0 +1,47 @@
+# ============================================================
+# Dead Effect - unityloader Konfiguration
+# Unity 2019.4.28f1 | IL2CPP | arm64-v8a
+# ============================================================
+
+[game]
+name = "Dead Effect"
+package = "com.bulkypix.deadeffect"
+
+[paths]
+# Wo die entpackten APK-Dateien liegen
+gamefiles = "gamefiles/unity"
+# Wo die .so-Dateien liegen
+libs = "lib"
+# Wo die Assets liegen (aus der OBB)
+assets = "gamefiles/unity/assets"
+
+[libraries]
+# Reihenfolge ist wichtig: libmain zuerst, dann libunity,
+# dann libil2cpp
+main = "libmain.so"
+unity = "libunity.so"
+il2cpp = "libil2cpp.so"
+
+[jni]
+# Unity-spezifische Java-Klassen, die das Spiel erwartet
+classes = [
+    "com/unity3d/player/UnityPlayer",
+    "com/unity3d/player/UnityPlayerActivity",
+    "android/app/Activity",
+    "android/content/Context",
+    "android/view/SurfaceView",
+    "android/view/View",
+    "android/os/Looper",
+]
+
+[graphics]
+# Mali-G31 MP2 auf RK3326
+backend = "gles2"
+width = 640
+height = 480
+fullscreen = true
+
+[audio]
+# OpenSL ES -> SDL2 -> ALSA
+backend = "opensles"
+driver = "alsa"
