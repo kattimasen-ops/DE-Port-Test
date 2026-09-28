@@ -64,6 +64,30 @@ static EGLDisplay    egl_dpy = EGL_NO_DISPLAY;
 static EGLSurface    egl_surf = EGL_NO_SURFACE;
 static EGLContext    egl_ctx = EGL_NO_CONTEXT;
 
+/* Heap-Konsistenzpruefung: allokiert und gibt drei verschiedene
+ * Groessen frei. Wenn der Heap beschädigt ist, crasht mindestens
+ * eine davon mit der glibc-Assertion. Wir pruefen das, um genau
+ * zu wissen, nach welcher Bibliothek der Heap kaputt ist. */
+static int heap_is_sane(const char *when) {
+    void *a = malloc(16);
+    if (!a) { LOGE("  Heap-Check(%s): malloc(16) fehlgeschlagen", when); return 0; }
+    memset(a, 0xAA, 16);
+    free(a);
+
+    void *b = malloc(256);
+    if (!b) { LOGE("  Heap-Check(%s): malloc(256) fehlgeschlagen", when); return 0; }
+    memset(b, 0xBB, 256);
+    free(b);
+
+    void *c = malloc(4096);
+    if (!c) { LOGE("  Heap-Check(%s): malloc(4096) fehlgeschlagen", when); return 0; }
+    memset(c, 0xCC, 4096);
+    free(c);
+
+    LOGI("  Heap OK (%s)", when);
+    return 1;
+}
+
 static int video_init(void) {
     if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) < 0) {
         LOGE("SDL_InitSubSystem: %s", SDL_GetError());
@@ -113,9 +137,6 @@ static void try_call_onload(const char *libname, void *handle) {
     LOGI("[%s] JNI_OnLoad -> 0x%x", libname, ver);
 }
 
-/* libc++_shared.so: Unity-Libs sind statisch gelinkt, externe libc++
- * ist nicht erforderlich. Wir versuchen sie trotzdem zu laden, falls
- * vorhanden — aber eine fehlende libc++ ist KEIN Fehler. */
 static void preload_libcxx(void) {
     char p[512];
     void *h = NULL;
@@ -127,17 +148,21 @@ static void preload_libcxx(void) {
     h = dlopen("libc++_shared.so", RTLD_NOW | RTLD_GLOBAL);
     if (h) { LOGI("libc++_shared.so vorgeladen (via Name): %p", h); return; }
 
-    LOGI("[INFO] externe libc++_shared.so nicht geladen — Unity-Libs sind statisch gelinkt, nicht benoetigt");
+    LOGI("[INFO] externe libc++_shared.so nicht geladen — "
+         "Unity-Libs sind statisch gelinkt, nicht benoetigt");
 }
 
 static int load_module_chain(void) {
     char path[512];
+
+    if (!heap_is_sane("vor libmain")) return -1;
 
     snprintf(path, sizeof(path), "%s/libmain.so", DEAD_EFFECT_LIBDIR);
     LOGI("Lade %s", path);
     g_libmain_handle = so_load(path);
     if (!g_libmain_handle) { LOGE("libmain.so laden fehlgeschlagen"); return -1; }
     LOGI("libmain.so geladen: %p", g_libmain_handle);
+    if (!heap_is_sane("nach libmain")) return -1;
     try_call_onload("libmain", g_libmain_handle);
 
     snprintf(path, sizeof(path), "%s/libunity.so", DEAD_EFFECT_LIBDIR);
@@ -145,6 +170,7 @@ static int load_module_chain(void) {
     g_libunity_handle = so_load(path);
     if (!g_libunity_handle) { LOGE("libunity.so laden fehlgeschlagen"); return -1; }
     LOGI("libunity.so geladen: %p", g_libunity_handle);
+    if (!heap_is_sane("nach libunity")) return -1;
     so_dump_symbols(g_libunity_handle);
     try_call_onload("libunity", g_libunity_handle);
 
@@ -153,6 +179,7 @@ static int load_module_chain(void) {
     g_libil2cpp_handle = so_load(path);
     if (!g_libil2cpp_handle) { LOGE("libil2cpp.so laden fehlgeschlagen"); return -1; }
     LOGI("libil2cpp.so geladen: %p", g_libil2cpp_handle);
+    if (!heap_is_sane("nach libil2cpp")) return -1;
     try_call_onload("libil2cpp", g_libil2cpp_handle);
 
     jni_dump_natives();
