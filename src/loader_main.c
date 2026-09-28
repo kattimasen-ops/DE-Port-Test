@@ -4,7 +4,7 @@
 #include <unistd.h>
 #include <dlfcn.h>
 #include <signal.h>
-#include <execinfo.h>
+#include <ucontext.h>
 #include <SDL2/SDL.h>
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
@@ -17,24 +17,105 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
-void abort(void) {
-    void *bt[64];
-    int n = backtrace(bt, 64);
-    fprintf(stderr, "\n### ABORT() AUFGERUFEN - Backtrace ###\n");
-    backtrace_symbols_fd(bt, n, 2);
-    fprintf(stderr, "### END BACKTRACE ###\n");
-    fflush(stderr);
-    _exit(134);
+/* ============================================================
+ * Robust Crash-Handler
+ * Kein malloc/fprintf/backtrace_symbols — die wuerden bei einem
+ * korrupten Heap selbst crashen. Nur write() und ein statischer
+ * Buffer. PC/SP/Fault-Addr kommen direkt aus dem Signal-Kontext.
+ * ============================================================ */
+
+/* Sehr primitives Hex-Format (kein malloc). */
+static int fmt_hex(uint64_t v, char *out) {
+    const char *hx = "0123456789abcdef";
+    int n = 0;
+    out[n++] = '0'; out[n++] = 'x';
+    int started = 0;
+    for (int i = 15; i >= 0; i--) {
+        int nibble = (v >> (i*4)) & 0xF;
+        if (nibble || started || i == 0) {
+            out[n++] = hx[nibble];
+            started = 1;
+        }
+    }
+    out[n] = 0;
+    return n;
 }
 
-static void crash_handler(int sig) {
-    void *bt[64];
-    int n = backtrace(bt, 64);
-    fprintf(stderr, "\n### SIGNAL %d EMPFANGEN - Backtrace ###\n", sig);
-    backtrace_symbols_fd(bt, n, 2);
-    fprintf(stderr, "### END BACKTRACE ###\n");
-    fflush(stderr);
+static int fmt_dec(int v, char *out) {
+    char tmp[16];
+    int n = 0;
+    if (v < 0) { out[n++] = '-'; v = -v; }
+    if (v == 0) { out[n++] = '0'; out[n] = 0; return n; }
+    while (v > 0) { tmp[n++] = '0' + (v % 10); v /= 10; }
+    for (int i = 0; i < n/2; i++) {
+        char t = tmp[i]; tmp[i] = tmp[n-1-i]; tmp[n-1-i] = t;
+    }
+    for (int i = 0; i < n; i++) out[i] = tmp[i];
+    out[n] = 0;
+    return n;
+}
+
+static void safe_write(const char *s) {
+    size_t len = 0;
+    while (s[len]) len++;
+    ssize_t r = write(2, s, len);
+    (void)r;
+}
+
+static void crash_handler(int sig, siginfo_t *info, void *uctx) {
+    ucontext_t *uc = (ucontext_t *)uctx;
+    char hexbuf[24];
+    char decbuf[16];
+    char line[256];
+    int n = 0;
+
+    /* Fester Vorspann */
+    const char *hdr = "\n### SIGNAL ";
+    while (*hdr) line[n++] = *hdr++;
+
+    fmt_dec(sig, decbuf);
+    for (int i = 0; decbuf[i]; i++) line[n++] = decbuf[i];
+
+    const char *p1 = " PC=";
+    while (*p1) line[n++] = *p1++;
+    fmt_hex((uint64_t)uc->uc_mcontext.pc, hexbuf);
+    for (int i = 0; hexbuf[i]; i++) line[n++] = hexbuf[i];
+
+    const char *p2 = " SP=";
+    while (*p2) line[n++] = *p2++;
+    fmt_hex((uint64_t)uc->uc_mcontext.sp, hexbuf);
+    for (int i = 0; hexbuf[i]; i++) line[n++] = hexbuf[i];
+
+    const char *p3 = " ADDR=";
+    while (*p3) line[n++] = *p3++;
+    fmt_hex((uint64_t)(info ? info->si_addr : 0), hexbuf);
+    for (int i = 0; hexbuf[i]; i++) line[n++] = hexbuf[i];
+
+    const char *tail = " ###\n";
+    while (*tail) line[n++] = *tail++;
+    line[n] = 0;
+    safe_write(line);
+
     _exit(128 + sig);
+}
+
+static void install_crash_handler(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = crash_handler;
+    sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS,  &sa, NULL);
+    sigaction(SIGILL,  &sa, NULL);
+    sigaction(SIGFPE,  &sa, NULL);
+    sigaction(SIGABRT, &sa, NULL);
+}
+
+/* abort() ueberschreiben: kein glibc-Backtrace, nur PC. */
+void abort(void) {
+    safe_write("\n### ABORT() AUFGERUFEN ###\n");
+    _exit(134);
 }
 
 #ifndef DEAD_EFFECT_LIBDIR
@@ -64,10 +145,6 @@ static EGLDisplay    egl_dpy = EGL_NO_DISPLAY;
 static EGLSurface    egl_surf = EGL_NO_SURFACE;
 static EGLContext    egl_ctx = EGL_NO_CONTEXT;
 
-/* Heap-Konsistenzpruefung auf Top-Chunk-Ebene.
- * Kleine Allokationen (16/256 B) landen im tcache und sehen
- * Top-Chunk-Korruption nicht. Eine 128-KB-Allokation kommt aus
- * dem Top-Chunk und zwingt glibc, die Metadaten zu validieren. */
 static int heap_is_sane(const char *when) {
     void *a = malloc(16);
     if (!a) { LOGE("  Heap-Check(%s): malloc(16) fehlgeschlagen", when); return 0; }
@@ -202,11 +279,7 @@ static int load_module_chain(void) {
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
-    signal(SIGSEGV, crash_handler);
-    signal(SIGBUS,  crash_handler);
-    signal(SIGILL,  crash_handler);
-    signal(SIGFPE,  crash_handler);
-    signal(SIGABRT, crash_handler);
+    install_crash_handler();
 
     LOGI("Dead Effect Loader startet");
     LOGI("  libdir = %s", DEAD_EFFECT_LIBDIR);
@@ -222,6 +295,7 @@ int main(int argc, char **argv) {
 
     int running = 1;
     void *env = jni_get_env();
+    int frame = 0;
     while (running) {
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
@@ -230,9 +304,19 @@ int main(int argc, char **argv) {
             jni_shim_handle_sdl_event(&ev);
         }
         if (unity_native_render && env) {
+            LOGI("render frame %d — rufe nativeRender ...", frame);
             unity_native_render(env, NULL, (long long)SDL_GetTicks(), 640, 480);
+            LOGI("render frame %d — nativeRender OK", frame);
+        } else {
+            LOGI("render frame %d — kein nativeRender/ env", frame);
         }
         SDL_GL_SwapWindow(sdl_win);
+        frame++;
+        if (frame > 5) {
+            /* Nach 5 Frames absichtlich beenden, damit Test kurz bleibt */
+            LOGI("5 Frames erreicht — beende Test");
+            running = 0;
+        }
     }
     if (unity_native_pause && env) unity_native_pause(env, NULL);
     LOGI("Loader beendet");
