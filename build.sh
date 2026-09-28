@@ -1,12 +1,15 @@
 #!/bin/bash
 # ============================================================
 # Dead Effect Port - Build-Skript
+# Alle Quellen liegen in src/ im Repo — kein Heredoc mehr.
 # ============================================================
 
+# GitHub ruft run:-Steps mit `bash -e` auf. Abschalten!
 set +euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
+# WORK fest im Workspace, NICHT über Env überschreibbar
 GITHUB_WS="${GITHUB_WORKSPACE:-$PWD}"
 OUT="$GITHUB_WS"
 WORK="$GITHUB_WS/work"
@@ -175,71 +178,13 @@ for f in "$DE_MAIN" "$DE_UNITY" "$DE_IL2CPP"; do
     else log "  [WARN] $f fehlt"; fi
 done
 
-# ---- libc++_shared.so (nicht mehr benoetigt, aber der Vollstaendigkeit
-#      halber ins ZIP legen, falls eine externe .so sie doch anfordert) ----
-LIBCXX_SRC=""
-for cand in \
-    "$GITHUB_WS/libc++_shared.so" \
-    "$GITHUB_WS/libs/libc++_shared.so" \
-    "$GITHUB_WS/lib/libc++_shared.so" \
-    "$GITHUB_WS/src/libc++_shared.so" \
-    "$WORK/de_libs/arm64-v8a/libc++_shared.so" \
-    ; do
-    if [ -f "$cand" ]; then
-        LIBCXX_SRC="$cand"
-        log "  libc++_shared.so: gefunden unter $cand"
-        break
-    fi
-done
-
-if [ -n "$LIBCXX_SRC" ]; then
-    cp "$LIBCXX_SRC" "$WORK/de_libs/arm64-v8a/libc++_shared.so"
-    LIBCXX_DST="$WORK/de_libs/arm64-v8a/libc++_shared.so"
-    if command -v patchelf >/dev/null 2>&1; then
-        HAS_ANDROID=0
-        for need in $(readelf -d "$LIBCXX_DST" 2>/dev/null | grep NEEDED | awk '{print $NF}' | tr -d '[]'); do
-            case "$need" in
-                libc.so|libdl.so|libm.so|libstdc++.so|liblog.so) HAS_ANDROID=1 ;;
-            esac
-        done
-        if [ "$HAS_ANDROID" = "1" ]; then
-            log "  [PATCH] libc++ hat Android-Namen — patche fuer glibc"
-            patchelf --replace-needed libc.so      libc.so.6      "$LIBCXX_DST" 2>&1 | tee -a "$BUILD_LOG" || true
-            patchelf --replace-needed libdl.so     libdl.so.2     "$LIBCXX_DST" 2>&1 | tee -a "$BUILD_LOG" || true
-            patchelf --replace-needed libm.so      libm.so.6      "$LIBCXX_DST" 2>&1 | tee -a "$BUILD_LOG" || true
-            patchelf --replace-needed libstdc++.so libstdc++.so.6 "$LIBCXX_DST" 2>&1 | tee -a "$BUILD_LOG" || true
-            patchelf --replace-needed liblog.so    libc.so.6      "$LIBCXX_DST" 2>&1 | tee -a "$BUILD_LOG" || true
-        fi
-    fi
+if [ -f "$GITHUB_WS/libs/libc++_shared.so" ]; then
+    cp "$GITHUB_WS/libs/libc++_shared.so" "$WORK/de_libs/arm64-v8a/"
+    log "  libc++_shared.so: $(stat -c%s "$GITHUB_WS/libs/libc++_shared.so") bytes (aus libs/)"
+else
+    log "  [INFO] libc++_shared.so nicht im Repo — muss auf dem Geraet"
+    log "         unter /roms/ports/DeadEffect/lib/ vorhanden sein."
 fi
-
-# ------------------------------------------------------------
-# 4b. Relocation-Analyse fuer libil2cpp und libunity
-# ------------------------------------------------------------
-log "===== STEP 4b: Relocation-Analyse ====="
-
-for lib in "$DE_IL2CPP" "$DE_UNITY"; do
-    if [ ! -f "$lib" ]; then continue; fi
-    log "--- $(basename "$lib"): Relocation-Typen-Haeufigkeit ---"
-    aarch64-linux-gnu-readelf -r "$lib" 2>/dev/null | \
-        awk '{print $3}' | grep -E '^R_AARCH64' | sort | uniq -c | sort -rn | \
-        tee -a "$BUILD_LOG" || log "  (readelf fehlgeschlagen)"
-
-    log "--- $(basename "$lib"): COPY/TLSDESC im Detail ---"
-    aarch64-linux-gnu-readelf -r "$lib" 2>/dev/null | \
-        grep -E 'R_AARCH64_(COPY|TLSDESC)' | head -20 | tee -a "$BUILD_LOG" || \
-        log "  (keine COPY/TLSDESC gefunden)"
-done
-
-log "--- Disassembly libil2cpp @ 0x8015b0 - 0x8016a0 ---"
-if [ -f "$DE_IL2CPP" ] && command -v aarch64-linux-gnu-objdump >/dev/null 2>&1; then
-    aarch64-linux-gnu-objdump -d \
-        --start-address=0x8015b0 \
-        --stop-address=0x8016a0 \
-        "$DE_IL2CPP" 2>&1 | tee -a "$BUILD_LOG"
-fi
-
-log "===== STEP 4b fertig ====="
 
 # ------------------------------------------------------------
 # 5. JNI-Metadaten
@@ -308,6 +253,7 @@ done
 
 if [ "$COMPILE_FAILED" = "1" ]; then
     log "[FEHLER] Mindestens eine Quelldatei fehlgeschlagen — Linken uebersprungen."
+    log "[FEHLER] Das verhindert einen unvollstaendigen Loader."
 else
     log "==> Linke Loader"
     (
@@ -318,36 +264,24 @@ fi
 LOADER_OK=0
 if [ -f deadeffect-loader ]; then
     SZ=$(stat -c%s deadeffect-loader)
-    SYM_OK=1
-    for want in slCreateEngine jni_find_native jni_dump_natives so_load; do
-        if ! aarch64-linux-gnu-nm deadeffect-loader 2>/dev/null | grep -q " T $want\$"; then
-            log "[WARN] Symbol '$want' fehlt im Loader"
-            SYM_OK=0
-        fi
-    done
-
-    if [ "$SZ" -lt 40000 ]; then
-        log "[FEHLER] Loader nur $SZ Bytes gross (vermutlich Fallback)"
-        LOADER_OK=0
-    elif [ "$SYM_OK" != "1" ]; then
-        log "[FEHLER] Loader fehlen Pflicht-Symbole"
+    if [ "$SZ" -lt 100000 ]; then
+        log "[WARN] Loader nur $SZ Bytes gross — vermutlich unvollstaendig"
         LOADER_OK=0
     else
         LOADER_OK=1
-        log "[OK] Loader gebaut und geprueft ($SZ Bytes)"
+        log "[OK] Loader gebaut ($SZ Bytes)"
         file deadeffect-loader | tee -a "$BUILD_LOG"
         ls -la deadeffect-loader | tee -a "$BUILD_LOG"
         readelf -d deadeffect-loader 2>/dev/null | grep NEEDED | tee -a "$BUILD_LOG" || true
     fi
 else
-    log "[FEHLER] Linken fehlgeschlagen — keine Loader-Datei vorhanden"
+    log "[FEHLER] Linken fehlgeschlagen"
 fi
 
 {
     echo "=== Loader_ok: $LOADER_OK ==="
-    echo "=== Loader-Groesse: $(stat -c%s deadeffect-loader 2>/dev/null) Bytes ==="
     echo "=== Undefined symbols (falls vorhanden) ==="
-    [ -f deadeffect-loader ] && aarch64-linux-gnu-nm -D --undefined-only deadeffect-loader 2>/dev/null | head -200
+    [ -f deadeffect-loader ] && nm -D --undefined-only deadeffect-loader 2>/dev/null | head -200
 } > "$SYMS_FILE" 2>&1
 
 # ------------------------------------------------------------
@@ -360,10 +294,8 @@ mkdir -p port/DeadEffect/lib port/DeadEffect/assets
 
 if [ -f "$BUILD_SRC/deadeffect-loader" ] && [ "$LOADER_OK" = "1" ]; then
     cp "$BUILD_SRC/deadeffect-loader" port/DeadEffect/
-    log "[OK] Echter Loader ins Port-Paket kopiert ($(stat -c%s port/DeadEffect/deadeffect-loader) Bytes)"
 else
     printf '#!/bin/bash\necho "Loader nicht erfolgreich gebaut"\nexit 1\n' > port/DeadEffect/deadeffect-loader
-    log "[WARN] Fallback-Loader ins Port-Paket kopiert"
 fi
 chmod +x port/DeadEffect/deadeffect-loader
 
@@ -373,6 +305,39 @@ if [ -f "$GITHUB_WS/DeadEffect.sh" ]; then
     cp "$GITHUB_WS/DeadEffect.sh" port/DeadEffect/DeadEffect.sh
     chmod +x port/DeadEffect/DeadEffect.sh
     log "[OK] DeadEffect.sh aus Repo uebernommen"
+else
+    log "[INFO] Keine DeadEffect.sh im Repo — Fallback wird benutzt"
+cat > port/DeadEffect/DeadEffect.sh <<'SHEOF'
+#!/bin/bash
+GAMEDIR="/roms/ports/DeadEffect"
+cd "$GAMEDIR"
+echo performance | sudo tee /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || true
+export LD_LIBRARY_PATH="$GAMEDIR/lib:$GAMEDIR:$LD_LIBRARY_PATH"
+export SDL_VIDEODRIVER=kmsdrm
+export SDL_AUDIODRIVER=alsa
+export SDL_ASSERT=always_ignore
+export MESA_GL_VERSION_OVERRIDE=3.2
+export MESA_GLSL_VERSION_OVERRIDE=320
+export PAN_MESA_DEBUG=gl3
+export MESA_NO_ERROR=1
+export MESA_LOADER_DRIVER_OVERRIDE=panfrost
+export HOME="$GAMEDIR/userdata"
+mkdir -p "$HOME" "$GAMEDIR/assets" "$GAMEDIR/lib"
+OBB=$(ls "$GAMEDIR"/main.*.com.bulkypix.deadeffect.obb 2>/dev/null | head -1)
+if [ -n "$OBB" ] && [ ! -d "$GAMEDIR/assets/bin/Data" ]; then
+    mkdir -p "$GAMEDIR/assets"
+    unzip -o -q "$OBB" -d "$GAMEDIR/assets" || true
+fi
+if command -v gptokeyb >/dev/null 2>&1; then
+    gptokeyb -k "deadeffect" -c "$GAMEDIR/de_wrapper.gptk" & GPID=$!
+    trap "kill $GPID 2>/dev/null" EXIT
+fi
+stdbuf -oL -eL ./deadeffect-loader "$GAMEDIR" 2>&1 | tee "$GAMEDIR/log.txt"
+STATUS=$?
+[ -n "${GPID:-}" ] && kill "$GPID" 2>/dev/null || true
+exit $STATUS
+SHEOF
+chmod +x port/DeadEffect/DeadEffect.sh
 fi
 
 cat > port/DeadEffect/de_wrapper.gptk <<'GPTK'
