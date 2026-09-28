@@ -17,28 +17,12 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
-/* ============================================================
- * Crash-Handler
- *
- * Hinweis zu abort():
- *  - Unser Override wird benutzt, wenn Code via PLT abort() aufruft.
- *  - glibc's interner Assert-Pfad (malloc, assert.h) umgeht den
- *    PLT und ruft internen abort -> raise(SIGABRT) -> unser
- *    SIGABRT-Handler wird aktiv.
- *  - Damit beide Pfade einen Backtrace liefern, registrieren wir
- *    zusaetzlich SIGABRT in main().
- * ============================================================ */
 void abort(void) {
     void *bt[64];
     int n = backtrace(bt, 64);
-    fprintf(stderr, "\n");
-    fprintf(stderr, "########################################\n");
-    fprintf(stderr, "### ABORT() AUFGERUFEN - Backtrace  ###\n");
-    fprintf(stderr, "########################################\n");
+    fprintf(stderr, "\n### ABORT() AUFGERUFEN - Backtrace ###\n");
     backtrace_symbols_fd(bt, n, 2);
-    fprintf(stderr, "########################################\n");
     fprintf(stderr, "### END BACKTRACE ###\n");
-    fprintf(stderr, "########################################\n");
     fflush(stderr);
     _exit(134);
 }
@@ -46,14 +30,9 @@ void abort(void) {
 static void crash_handler(int sig) {
     void *bt[64];
     int n = backtrace(bt, 64);
-    fprintf(stderr, "\n");
-    fprintf(stderr, "########################################\n");
-    fprintf(stderr, "### SIGNAL %d EMPFANGEN - Backtrace ###\n", sig);
-    fprintf(stderr, "########################################\n");
+    fprintf(stderr, "\n### SIGNAL %d EMPFANGEN - Backtrace ###\n", sig);
     backtrace_symbols_fd(bt, n, 2);
-    fprintf(stderr, "########################################\n");
     fprintf(stderr, "### END BACKTRACE ###\n");
-    fprintf(stderr, "########################################\n");
     fflush(stderr);
     _exit(128 + sig);
 }
@@ -85,16 +64,11 @@ static EGLDisplay    egl_dpy = EGL_NO_DISPLAY;
 static EGLSurface    egl_surf = EGL_NO_SURFACE;
 static EGLContext    egl_ctx = EGL_NO_CONTEXT;
 
-/* ============================================================
- * Video-Init
- * ============================================================ */
 static int video_init(void) {
     if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) < 0) {
         LOGE("SDL_InitSubSystem: %s", SDL_GetError());
         return -1;
     }
-    /* Audio von Unity aus, wir machen kein SDL_INIT_AUDIO hier.
-     * Der OpenSL-Shim oeffnet spaeter selbst einen Audio-Device. */
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
@@ -128,9 +102,6 @@ static int video_init(void) {
     return 0;
 }
 
-/* ============================================================
- * JNI_OnLoad-Aufruf
- * ============================================================ */
 static void try_call_onload(const char *libname, void *handle) {
     JNI_OnLoad_t fn = (JNI_OnLoad_t) so_find_addr(handle, "JNI_OnLoad");
     if (!fn) {
@@ -142,9 +113,6 @@ static void try_call_onload(const char *libname, void *handle) {
     LOGI("[%s] JNI_OnLoad -> 0x%x", libname, ver);
 }
 
-/* ============================================================
- * libc++_shared.so vorladen (bevor libunity/libil2cpp geladen werden)
- * ============================================================ */
 static void preload_libcxx(void) {
     char p[512];
     void *h = NULL;
@@ -161,15 +129,9 @@ static void preload_libcxx(void) {
          DEAD_EFFECT_LIBDIR);
 }
 
-/* ============================================================
- * Modul-Kette: libmain -> libunity -> libil2cpp
- * libunity hat DT_NEEDED libmain.so, deshalb MUSS libmain
- * zuerst geladen und initialisiert werden.
- * ============================================================ */
 static int load_module_chain(void) {
     char path[512];
 
-    /* 1. libmain.so */
     snprintf(path, sizeof(path), "%s/libmain.so", DEAD_EFFECT_LIBDIR);
     LOGI("Lade %s", path);
     g_libmain_handle = so_load(path);
@@ -177,7 +139,6 @@ static int load_module_chain(void) {
     LOGI("libmain.so geladen: %p", g_libmain_handle);
     try_call_onload("libmain", g_libmain_handle);
 
-    /* 2. libunity.so */
     snprintf(path, sizeof(path), "%s/libunity.so", DEAD_EFFECT_LIBDIR);
     LOGI("Lade %s", path);
     g_libunity_handle = so_load(path);
@@ -186,7 +147,6 @@ static int load_module_chain(void) {
     so_dump_symbols(g_libunity_handle);
     try_call_onload("libunity", g_libunity_handle);
 
-    /* 3. libil2cpp.so */
     snprintf(path, sizeof(path), "%s/libil2cpp.so", DEAD_EFFECT_LIBDIR);
     LOGI("Lade %s", path);
     g_libil2cpp_handle = so_load(path);
@@ -194,10 +154,8 @@ static int load_module_chain(void) {
     LOGI("libil2cpp.so geladen: %p", g_libil2cpp_handle);
     try_call_onload("libil2cpp", g_libil2cpp_handle);
 
-    /* 4. JNI-Registry ausgeben */
     jni_dump_natives();
 
-    /* 5. UnityPlayer-Native-Methoden aus Registry holen */
     const char *UP = "com/unity3d/player/UnityPlayer";
     unity_init_jni      = (initJni_t)      jni_find_native(UP, "initJni");
     unity_native_render = (nativeRender_t) jni_find_native(UP, "nativeRender");
@@ -218,9 +176,6 @@ static int load_module_chain(void) {
     return 0;
 }
 
-/* ============================================================
- * main
- * ============================================================ */
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
@@ -228,15 +183,13 @@ int main(int argc, char **argv) {
     signal(SIGBUS,  crash_handler);
     signal(SIGILL,  crash_handler);
     signal(SIGFPE,  crash_handler);
-    signal(SIGABRT, crash_handler);   /* NEU: faengt glibc-Assertions */
+    signal(SIGABRT, crash_handler);
 
     LOGI("Dead Effect Loader startet");
     LOGI("  libdir = %s", DEAD_EFFECT_LIBDIR);
     LOGI("  assets = %s", DEAD_EFFECT_ASSETS);
 
     jni_shim_init();
-
-    /* libc++ VOR allen anderen .so laden */
     preload_libcxx();
 
     if (video_init() != 0) return 1;
@@ -254,4 +207,11 @@ int main(int argc, char **argv) {
             jni_shim_handle_sdl_event(&ev);
         }
         if (unity_native_render && env) {
-            unity_native_render(env, NULL, (long long)SDL_GetTick
+            unity_native_render(env, NULL, (long long)SDL_GetTicks(), 640, 480);
+        }
+        SDL_GL_SwapWindow(sdl_win);
+    }
+    if (unity_native_pause && env) unity_native_pause(env, NULL);
+    LOGI("Loader beendet");
+    return 0;
+}
