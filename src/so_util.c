@@ -44,7 +44,6 @@ static struct {
 static int g_sym_cache_next = 0;
 
 static void *resolve_symbol_full(const char *name) {
-    /* 1. In eigenen geladenen Modulen suchen (fuer Self-Referenzen) */
     for (int i = 0; i < g_nmods; i++) {
         so_module *m = &g_modules[i];
         if (!m->symtab || !m->strtab) continue;
@@ -58,11 +57,9 @@ static void *resolve_symbol_full(const char *name) {
         }
     }
 
-    /* 2. In unserem eigenen Prozess (Loader-Exporte) */
     void *p = dlsym(RTLD_DEFAULT, name);
     if (p) return p;
 
-    /* 3. In System-Bibliotheken (libc++_shared.so ZUERST!) */
     static void *sys_libs[12] = {0};
     static const char *sys_names[] = {
         "libc++_shared.so",
@@ -102,8 +99,6 @@ static void relocate(so_module *m, Elf64_Rela *rel, size_t count) {
         uint32_t type = ELF64_R_TYPE(r->r_info);
         uint32_t sym  = ELF64_R_SYM(r->r_info);
 
-        /* Sicherheitscheck: Offset muss innerhalb des geladenen Bereichs
-         * liegen. Verhindert Heap-Corruption durch defekte Relocs. */
         if (r->r_offset + sizeof(uint64_t) > m->size) {
             LOGE("Ungueltiger Reloc-Offset 0x%lx (span=%zu) — ueberspringe",
                  (unsigned long)r->r_offset, m->size);
@@ -138,6 +133,33 @@ static void relocate(so_module *m, Elf64_Rela *rel, size_t count) {
                 break;
         }
     }
+}
+
+/* Sucht den naechstgelegenen Funktionsnamen fuer einen Offset */
+static const char *find_nearest_symbol(so_module *m, uint64_t target_off) {
+    static char buf[320];
+    const char *best = NULL;
+    uint64_t best_dist = (uint64_t)-1;
+    for (size_t i = 0; i < m->symcount; i++) {
+        Elf64_Sym *s = &m->symtab[i];
+        if (s->st_shndx == SHN_UNDEF) continue;
+        if (!s->st_name) continue;
+        if (s->st_value == 0) continue;
+        unsigned type = ELF64_ST_TYPE(s->st_info);
+        if (type != STT_FUNC && type != STT_OBJECT && type != STT_NOTYPE) continue;
+        if (s->st_value <= target_off) {
+            uint64_t dist = target_off - s->st_value;
+            if (dist < best_dist) {
+                best_dist = dist;
+                best = m->strtab + s->st_name;
+            }
+        }
+    }
+    if (best) {
+        snprintf(buf, sizeof(buf), "%s+0x%lx", best, (unsigned long)best_dist);
+        return buf;
+    }
+    return "(unbekannt)";
 }
 
 void *so_load(const char *path) {
@@ -245,15 +267,32 @@ void *so_load(const char *path) {
     LOGI("  symcount=%zu rela=%zu jmprel=%zu init=%zu",
          m->symcount, m->relacount, m->jmprelcount, m->init_count);
 
-    /* Sym-Cache leeren, damit der aktuelle Modul-Symbolstand aktuell ist */
     for (int i = 0; i < SYM_CACHE_SIZE; i++) {
         g_sym_cache[i].name = NULL;
         g_sym_cache[i].addr = NULL;
     }
     g_sym_cache_next = 0;
 
+    /* ---- Heap-Check VOR Relocations ---- */
+    LOGI("=== Heap-Check vor Relocations ===");
+    {
+        void *t1 = malloc(16);  LOGI("  malloc(16)  = %p", t1);  free(t1);
+        void *t2 = malloc(256); LOGI("  malloc(256) = %p", t2);  free(t2);
+        void *t3 = malloc(4096);LOGI("  malloc(4096)= %p", t3);  free(t3);
+    }
+    LOGI("=== Heap vor Relocations OK ===");
+
     if (m->rela && m->relacount)       relocate(m, m->rela, m->relacount);
     if (m->jmprel && m->jmprelcount)   relocate(m, m->jmprel, m->jmprelcount);
+
+    /* ---- Heap-Check NACH Relocations ---- */
+    LOGI("=== Heap-Check nach Relocations ===");
+    {
+        void *t1 = malloc(16);  LOGI("  malloc(16)  = %p", t1);  free(t1);
+        void *t2 = malloc(256); LOGI("  malloc(256) = %p", t2);  free(t2);
+        void *t3 = malloc(4096);LOGI("  malloc(4096)= %p", t3);  free(t3);
+    }
+    LOGI("=== Heap nach Relocations OK ===");
 
     if (m->init_array && m->init_count) {
         LOGI("=== init_array: %zu Eintraege (base=%p) ===",
@@ -261,8 +300,19 @@ void *so_load(const char *path) {
         for (size_t i = 0; i < m->init_count; i++) {
             void (*fn)(void) = m->init_array[i];
             uintptr_t off = (uintptr_t)fn - (uintptr_t)m->base;
-            LOGI("  init_array[%zu/%zu] = %p (off 0x%lx)",
-                 i, m->init_count, fn, (unsigned long)off);
+            LOGI("  init_array[%zu/%zu] = %p (off 0x%lx, %s)",
+                 i, m->init_count, fn, (unsigned long)off,
+                 find_nearest_symbol(m, off));
+
+            /* Heap-Check vor jedem Aufruf */
+            void *ht = malloc(32);
+            if (!ht) {
+                LOGE("  !!! Heap BROKEN vor init_array[%zu/%zu] !!!",
+                     i, m->init_count);
+                break;
+            }
+            free(ht);
+
             if (fn) fn();
         }
         LOGI("=== init_array fertig ===");
