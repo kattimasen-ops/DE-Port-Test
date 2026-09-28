@@ -256,10 +256,13 @@ void *so_load(const char *path) {
     if (m->jmprel && m->jmprelcount)   relocate(m, m->jmprel, m->jmprelcount);
 
     if (m->init_array && m->init_count) {
-        LOGI("=== init_array: %zu Eintraege ===", m->init_count);
+        LOGI("=== init_array: %zu Eintraege (base=%p) ===",
+             m->init_count, m->base);
         for (size_t i = 0; i < m->init_count; i++) {
             void (*fn)(void) = m->init_array[i];
-            LOGI("  init_array[%zu/%zu] = %p", i, m->init_count, fn);
+            uintptr_t off = (uintptr_t)fn - (uintptr_t)m->base;
+            LOGI("  init_array[%zu/%zu] = %p (off 0x%lx)",
+                 i, m->init_count, fn, (unsigned long)off);
             if (fn) fn();
         }
         LOGI("=== init_array fertig ===");
