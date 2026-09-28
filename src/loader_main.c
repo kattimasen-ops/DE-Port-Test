@@ -18,8 +18,30 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
 /* ============================================================
- * Crash-Handler: gibt Backtrace bei Signal
+ * Crash-Handler
+ *
+ * WICHTIG: glibc's abort() setzt den SIGABRT-Handler auf SIG_DFL
+ * zurueck, BEVOR es raise(SIGABRT) macht. Ein signal()-Handler
+ * auf SIGABRT wird also ignoriert.
+ *
+ * Loesung: Wir ueberschreiben abort() selbst. Der dynamische
+ * Linker bevorzugt unser globales Symbol.
  * ============================================================ */
+void abort(void) {
+    void *bt[64];
+    int n = backtrace(bt, 64);
+    fprintf(stderr, "\n");
+    fprintf(stderr, "########################################\n");
+    fprintf(stderr, "### ABORT() AUFGERUFEN — Backtrace  ###\n");
+    fprintf(stderr, "########################################\n");
+    backtrace_symbols_fd(bt, n, 2);
+    fprintf(stderr, "########################################\n");
+    fprintf(stderr, "### END BACKTRACE ###\n");
+    fprintf(stderr, "########################################\n");
+    fflush(stderr);
+    _exit(134);
+}
+
 static void crash_handler(int sig) {
     void *bt[64];
     int n = backtrace(bt, 64);
@@ -27,10 +49,11 @@ static void crash_handler(int sig) {
     fprintf(stderr, "########################################\n");
     fprintf(stderr, "### SIGNAL %d EMPFANGEN — Backtrace ###\n", sig);
     fprintf(stderr, "########################################\n");
-    backtrace_symbols_fd(bt, n, 2);   /* 2 = STDERR */
+    backtrace_symbols_fd(bt, n, 2);
     fprintf(stderr, "########################################\n");
     fprintf(stderr, "### END BACKTRACE ###\n");
     fprintf(stderr, "########################################\n");
+    fflush(stderr);
     _exit(128 + sig);
 }
 
@@ -108,18 +131,14 @@ static void try_call_onload(const char *libname, void *handle) {
 static int load_module_chain(void) {
     char path[512];
 
-    /* -----------------------------------------------------------------
-     * 1. libil2cpp.so ZUERST laden
-     * ----------------------------------------------------------------- */
+    /* 1. libil2cpp.so */
     snprintf(path, sizeof(path), "%s/libil2cpp.so", DEAD_EFFECT_LIBDIR);
     LOGI("Lade %s", path);
     g_libil2cpp_handle = so_load(path);
     if (!g_libil2cpp_handle) { LOGE("libil2cpp.so laden fehlgeschlagen"); return -1; }
     LOGI("libil2cpp.so geladen: %p", g_libil2cpp_handle);
 
-    /* -----------------------------------------------------------------
-     * 2. libunity.so laden
-     * ----------------------------------------------------------------- */
+    /* 2. libunity.so */
     snprintf(path, sizeof(path), "%s/libunity.so", DEAD_EFFECT_LIBDIR);
     LOGI("Lade %s", path);
     g_libunity_handle = so_load(path);
@@ -127,14 +146,10 @@ static int load_module_chain(void) {
     LOGI("libunity.so geladen: %p", g_libunity_handle);
     so_dump_symbols(g_libunity_handle);
 
-    /* -----------------------------------------------------------------
-     * 3. JNI_OnLoad in libunity (registriert Native-Methoden)
-     * ----------------------------------------------------------------- */
+    /* 3. JNI_OnLoad in libunity */
     try_call_onload("libunity", g_libunity_handle);
 
-    /* -----------------------------------------------------------------
-     * 4. libmain.so (optional)
-     * ----------------------------------------------------------------- */
+    /* 4. libmain.so (optional) */
     snprintf(path, sizeof(path), "%s/libmain.so", DEAD_EFFECT_LIBDIR);
     LOGI("Lade %s", path);
     g_libmain_handle = so_load(path);
@@ -143,14 +158,10 @@ static int load_module_chain(void) {
         try_call_onload("libmain", g_libmain_handle);
     }
 
-    /* -----------------------------------------------------------------
-     * 5. Registry dumpen
-     * ----------------------------------------------------------------- */
+    /* 5. Registry dumpen */
     jni_dump_natives();
 
-    /* -----------------------------------------------------------------
-     * 6. UnityPlayer-Methoden aus der JNI-Registry holen
-     * ----------------------------------------------------------------- */
+    /* 6. UnityPlayer-Methoden aus der JNI-Registry holen */
     const char *UP = "com/unity3d/player/UnityPlayer";
     unity_init_jni      = (initJni_t)      jni_find_native(UP, "initJni");
     unity_native_render = (nativeRender_t) jni_find_native(UP, "nativeRender");
@@ -160,9 +171,7 @@ static int load_module_chain(void) {
     LOGI("  nativeRender = %p", unity_native_render);
     LOGI("  nativePause  = %p", unity_native_pause);
 
-    /* -----------------------------------------------------------------
-     * 7. initJni aufrufen
-     * ----------------------------------------------------------------- */
+    /* 7. initJni aufrufen */
     if (unity_init_jni) {
         void *env = jni_get_env();
         LOGI("Rufe initJni(env=%p, NULL, NULL)", env);
@@ -177,9 +186,8 @@ static int load_module_chain(void) {
 }
 
 int main(int argc, char **argv) {
-    /* Signal-Handler installieren, damit Abstuerze einen Backtrace liefern */
+    /* Nur SIGSEGV, SIGBUS, SIGILL, SIGFPE — SIGABRT faengt abort() */
     signal(SIGSEGV, crash_handler);
-    signal(SIGABRT, crash_handler);
     signal(SIGBUS,  crash_handler);
     signal(SIGILL,  crash_handler);
     signal(SIGFPE,  crash_handler);
