@@ -70,12 +70,12 @@ static jni_id_entry g_fids[JNI_MAX_FIDS];
 static int          g_fid_count = 0;
 
 /* ---- Class Registry ---- */
-static char   g_class_names[JNI_MAX_CLASSES][128];
-static int    g_class_count = 0;
+static char    g_class_names[JNI_MAX_CLASSES][128];
+static int     g_class_count = 0;
 static uint8_t g_class_storage[JNI_MAX_CLASSES][64];
 
 /* ---- Fake Object Storage (stable pointers) ---- */
-static uint8_t g_fake_obj_storage[64] = {0};
+static uint8_t g_fake_obj_storage[64]  = {0};
 static uint8_t g_fake_str_storage[256] = {0};
 
 /* ================================================================
@@ -104,7 +104,6 @@ static int find_fid_index(void *fid) {
 static const char *class_name_from_handle(void *cls) {
     if (!cls) return "?";
     uintptr_t p = (uintptr_t)cls;
-    uintptr_t base = (uintptr_t)&g_class_storage[0][0];
     for (int i = 0; i < g_class_count; i++) {
         if (p == (uintptr_t)&g_class_storage[i][0])
             return g_class_names[i];
@@ -128,7 +127,7 @@ static int jni_vm_AttachCurrentThread(void *vm, void **penv, void *args) {
     return 0;
 }
 static int jni_vm_DetachCurrentThread(void *vm) { (void)vm; return 0; }
-static int jni_vm_DestroyJavaVM(void *vm)      { (void)vm; return 0; }
+static int jni_vm_DestroyJavaVM(void *vm)       { (void)vm; return 0; }
 
 /* ================================================================
  * JNIEnv: Grundfunktionen
@@ -164,7 +163,6 @@ static int jni_env_IsInstanceOf(void *env, void *obj, void *cls) {
     (void)env;
     const char *cn = class_name_from_handle(cls);
     LOGI("JNI IsInstanceOf(obj=%p, class=%s) -> true (fake)", obj, cn);
-    /* Fake: Jedes Objekt ist Instanz jeder Klasse */
     return obj != NULL ? 1 : 0;
 }
 
@@ -238,14 +236,8 @@ static void *jni_env_GetStaticFieldID(void *env, void *cls,
 
 /* ================================================================
  * JNIEnv: Call*Method Dispatcher
- *
- * Zentrale Logik: Bei CallObjectMethod/CallStaticObjectMethod wird
- * der Methodenname aus der mid-Registry gelesen und je nach Name
- * ein sinnvoller Fake-Rückgabewert geliefert.
  * ================================================================ */
 static void *make_fake_string(const char *s) {
-    /* Wir geben den C-String direkt als jstring zurueck.
-     * GetStringUTFChars liefert denselben Zeiger. */
     return (void *)s;
 }
 
@@ -260,28 +252,20 @@ static uintptr_t jni_dispatch_object_method(void *mid, int is_static) {
          is_static ? "static " : "",
          e->class_name, e->method_name, e->signature);
 
-    /* ---- AudioManager ---- */
     if (strstr(e->class_name, "AudioManager") ||
         strstr(e->method_name, "getProperty")) {
         if (strstr(e->method_name, "getProperty")) {
-            /* PROPERTY_OUTPUT_SAMPLE_RATE -> "48000"
-             * PROPERTY_OUTPUT_FRAMES_PER_BUFFER -> "256"
-             * Wir koennen nicht zwischen beiden unterscheiden,
-             * weil der String-Parameter nicht sichtbar ist.
-             * Standard: 48000 (Sample Rate) */
             LOGI("  [dispatch] -> fake AudioManager property \"48000\"");
             return (uintptr_t)make_fake_string("48000");
         }
     }
 
-    /* ---- Integer.parseInt ---- */
     if (strstr(e->method_name, "parseInt") ||
         strstr(e->method_name, "valueOf")) {
         LOGI("  [dispatch] -> fake int 0");
         return 0;
     }
 
-    /* ---- Display / Metrics ---- */
     if (strstr(e->method_name, "getWidth")  ||
         strstr(e->method_name, "getHeight") ||
         strstr(e->method_name, "getDisplayMetrics")) {
@@ -289,7 +273,6 @@ static uintptr_t jni_dispatch_object_method(void *mid, int is_static) {
         return 0;
     }
 
-    /* ---- Default ---- */
     LOGI("  [dispatch] -> NULL (unbekannt)");
     return 0;
 }
@@ -312,8 +295,8 @@ static uintptr_t jni_dispatch_int_method(void *mid, int is_static) {
          is_static ? "static " : "",
          e->class_name, e->method_name, e->signature);
 
-    if (strstr(e->method_name, "getWidth"))  return 640;
-    if (strstr(e->method_name, "getHeight")) return 480;
+    if (strstr(e->method_name, "getWidth"))   return 640;
+    if (strstr(e->method_name, "getHeight"))  return 480;
     if (strstr(e->method_name, "getVersion")) return 0x00010006;
     return 0;
 }
@@ -355,6 +338,14 @@ static uintptr_t jni_env_CallStaticObjectMethodV(void *env, void *cls, void *mid
     (void)env; (void)cls; (void)args;
     return jni_dispatch_object_method(mid, 1);
 }
+static uintptr_t jni_env_CallVoidMethodV(void *env, void *obj, void *mid, va_list args) {
+    (void)env; (void)obj; (void)args;
+    return jni_dispatch_void_method(mid, 0);
+}
+static uintptr_t jni_env_CallStaticVoidMethodV(void *env, void *cls, void *mid, va_list args) {
+    (void)env; (void)cls; (void)args;
+    return jni_dispatch_void_method(mid, 1);
+}
 static uintptr_t jni_env_CallVoidMethodA(void *env, void *obj, void *mid, void *args) {
     (void)env; (void)obj; (void)args;
     return jni_dispatch_void_method(mid, 0);
@@ -362,6 +353,14 @@ static uintptr_t jni_env_CallVoidMethodA(void *env, void *obj, void *mid, void *
 static uintptr_t jni_env_CallStaticVoidMethodA(void *env, void *cls, void *mid, void *args) {
     (void)env; (void)cls; (void)args;
     return jni_dispatch_void_method(mid, 1);
+}
+static uintptr_t jni_env_CallObjectMethodA(void *env, void *obj, void *mid, void *args) {
+    (void)env; (void)obj; (void)args;
+    return jni_dispatch_object_method(mid, 0);
+}
+static uintptr_t jni_env_CallStaticObjectMethodA(void *env, void *cls, void *mid, void *args) {
+    (void)env; (void)cls; (void)args;
+    return jni_dispatch_object_method(mid, 1);
 }
 
 /* ================================================================
@@ -485,16 +484,16 @@ static void *jni_env_AllocObject(void *env, void *cls) {
  * ================================================================ */
 static void *jni_env_NewGlobalRef(void *env, void *obj) { (void)env; return obj; }
 static void *jni_env_NewLocalRef(void *env, void *obj)  { (void)env; return obj; }
-static void jni_env_DeleteGlobalRef(void *env, void *obj) { (void)env; (void)obj; }
-static void jni_env_DeleteLocalRef(void *env, void *obj)  { (void)env; (void)obj; }
+static void  jni_env_DeleteGlobalRef(void *env, void *obj) { (void)env; (void)obj; }
+static void  jni_env_DeleteLocalRef(void *env, void *obj)  { (void)env; (void)obj; }
 
 /* ================================================================
  * JNIEnv: Exceptions
  * ================================================================ */
 static void *jni_env_ExceptionOccurred(void *env) { (void)env; return NULL; }
-static void jni_env_ExceptionDescribe(void *env)    { (void)env; }
-static void jni_env_ExceptionClear(void *env)      { (void)env; }
-static int  jni_env_ExceptionCheck(void *env)      { (void)env; return 0; }
+static void  jni_env_ExceptionDescribe(void *env) { (void)env; }
+static void  jni_env_ExceptionClear(void *env)    { (void)env; }
+static int   jni_env_ExceptionCheck(void *env)    { (void)env; return 0; }
 
 /* ================================================================
  * JNIEnv: VM Access
@@ -534,7 +533,7 @@ static int jni_env_RegisterNatives(void *env, void *cls,
 static int jni_env_UnregisterNatives(void *env, void *cls) { (void)env; (void)cls; return 0; }
 
 /* ================================================================
- * JNIEnv: Tabelle initialisieren
+ * Slot-Nummern der JNIEnv-Tabelle (JDK 8 / jni.h)
  * ================================================================ */
 #define ENV_GetVersion                4
 #define ENV_FindClass                 6
@@ -557,4 +556,7 @@ static int jni_env_UnregisterNatives(void *env, void *cls) { (void)env; (void)cl
 #define ENV_CallBooleanMethod        37
 #define ENV_CallIntMethod            49
 #define ENV_CallVoidMethod           61
-#define ENV_CallVoidMethodA          6
+#define ENV_CallVoidMethodV          62
+#define ENV_CallVoidMethodA          63
+#define ENV_GetFieldID               94
+#define 
