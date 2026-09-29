@@ -35,6 +35,7 @@ jobs:
         run: |
           echo "=== Tool-Versionen ==="
           aarch64-linux-gnu-objdump --version | head -1
+          aarch64-linux-gnu-readelf --version | head -1
           rabin2 -v 2>&1 | head -1 || true
           scanelf --version 2>&1 | head -1 || true
           python3 -c "import lief; print('LIEF', lief.__version__)" || true
@@ -62,7 +63,7 @@ jobs:
           fi
 
       # ============================================================
-      # PHASE 1: Basis-Analyse mit binutils (readelf, nm, objdump)
+      # PHASE 1: Basis-Analyse mit binutils
       # ============================================================
       - name: "Phase 1: libmain.so – Basis-Analyse"
         run: |
@@ -94,14 +95,14 @@ jobs:
             readelf -l "$LIB" > analysis/libunity/program_headers.txt 2>&1
             readelf -SW "$LIB" > analysis/libunity/section_headers.txt 2>&1
             readelf -sW "$LIB" > analysis/libunity/symbols_all.txt 2>&1
-            readelf -rW "$LIB" > analysis/libunity/relocations.txt 2>&1
+            readelf -rW "$LIB" > analysis/libunity/relocations_full.txt 2>&1
             nm -D "$LIB" > analysis/libunity/nm_dynamic.txt 2>&1
             nm "$LIB"   > analysis/libunity/nm_all.txt 2>&1
 
             aarch64-linux-gnu-readelf -sW "$LIB" | grep -E "FUNC.*GLOBAL.*DEFAULT" | sort \
-              > analysis/libunity/symbols_exported.txt 2>&1
+              > analysis/libunity/symbols_exported.txt 2>&1 || true
             aarch64-linux-gnu-readelf -sW "$LIB" | grep -E "UND" | sort \
-              > analysis/libunity/symbols_imported.txt 2>&1
+              > analysis/libunity/symbols_imported.txt 2>&1 || true
 
             echo "=== Symbol-Statistik ===" > analysis/libunity/symbol_stats.txt
             echo "Alle Symbole: $(wc -l < analysis/libunity/symbols_all.txt)" >> analysis/libunity/symbol_stats.txt
@@ -110,32 +111,12 @@ jobs:
 
             strings -a "$LIB" > analysis/libunity/strings_all.txt 2>&1
             strings -a "$LIB" | grep -E "^native[A-Z]|^nOn|^init[A-Z]|^deinit[A-Z]|^setVr|^isQuiting|^onAudio|^initializeARCore|^pauseARCore|^resumeARCore" \
-              | sort -u > analysis/libunity/strings_native_methods.txt
-            strings -a "$LIB" | grep -E "^com/unity3d/player/" | sort -u > analysis/libunity/strings_unity_classes.txt
+              | sort -u > analysis/libunity/strings_native_methods.txt || true
+            strings -a "$LIB" | grep -E "^com/unity3d/player/" | sort -u > analysis/libunity/strings_unity_classes.txt || true
             strings -a "$LIB" | grep -E "^com/google/androidgamesdk/|^bitter/jnibridge/|^android/" \
-              | sort -u > analysis/libunity/strings_jni_classes.txt
-            strings -a "$LIB" | grep -E "^\(.*\)[VZBCSIJFD]|^\(.*\)L" | sort -u > analysis/libunity/strings_signatures.txt
+              | sort -u > analysis/libunity/strings_jni_classes.txt || true
+            strings -a "$LIB" | grep -E "^\(.*\)[VZBCSIJFD]|^\(.*\)L" | sort -u > analysis/libunity/strings_signatures.txt || true
           fi
-
-      - name: "Phase 1: libunity.so – Disassembly der nativen Methoden"
-        continue-on-error: true
-        run: |
-          LIB="analysis/deadeffect/libunity.so"
-          if [ ! -f "$LIB" ]; then exit 0; fi
-
-          NATIVE_METHODS="nativeSendSurfaceChangedEvent nativeRecreateGfxState nativeFocusChanged nativeResume nativePause nativeDone nativeLowMemory nativeApplicationUnload nativeInjectEvent nativeUnitySendMessage nativeSetInputArea nativeSetKeyboardIsVisible nativeSetInputString nativeSetInputSelection nativeSoftInputClosed nativeSoftInputCanceled nativeSoftInputLostFocus nativeReportKeyboardConfigChanged nativeRestartActivityIndicator nativeSetLaunchURL nativeOrientationChanged nativeIsAutorotationOn nativeMuteMasterAudio nativeFrameReady nativeSurfaceTextureReady nOnChoreographer nOnRefreshRateChanged nSetSupportedRefreshRates initializeARCore pauseARCore resumeARCore initVrJni setVrVideoTransform isQuiting initCamera2Jni deinitCamera2Jni initHFPStatusJni deinitHFPStatusJni onAudioVolumeChanged JNI_OnLoad RegisterNatives"
-
-          for SYM in $NATIVE_METHODS; do
-            ADDR=$(aarch64-linux-gnu-readelf -sW "$LIB" | grep -i " $SYM" | head -1 | awk '{print $2}')
-            if [ -z "$ADDR" ] || [ "$ADDR" = "0" ]; then continue; fi
-            ADDR_HEX=$(echo "$ADDR" | sed 's/0x//')
-            ADDR_DEC=$((16#$ADDR_HEX))
-            START=$(printf "0x%x" $((ADDR_DEC - 128)))
-            STOP=$(printf  "0x%x" $((ADDR_DEC + 1024)))
-            aarch64-linux-gnu-objdump -d --start-address=$START --stop-address=$STOP "$LIB" \
-              > "analysis/libunity/disasm_${SYM}.txt" 2>&1 || true
-          done
-          ls -la analysis/libunity/disasm_*.txt 2>/dev/null | head -50 || true
 
       - name: "Phase 1: libil2cpp.so – Basis-Analyse"
         run: |
@@ -156,15 +137,354 @@ jobs:
             echo "=== Symbol-Statistik ===" > analysis/libil2cpp/symbol_stats.txt
             echo "Alle Symbole: $(wc -l < analysis/libil2cpp/symbols_all.txt)" >> analysis/libil2cpp/symbol_stats.txt
 
-            strings -a "$LIB" | grep -iE "il2cpp|unity|mono|metadata" | sort -u > analysis/libil2cpp/strings_il2cpp.txt
-            strings -a "$LIB" | grep -E "^[a-zA-Z_][a-zA-Z0-9_]*__[a-zA-Z0-9_]+$" | sort -u > analysis/libil2cpp/strings_methods.txt
-            strings -a "$LIB" | grep -E "^native[A-Z]|^nOn|^init[A-Z]|^deinit[A-Z]" | sort -u > analysis/libil2cpp/strings_native_methods.txt
+            strings -a "$LIB" | grep -iE "il2cpp|unity|mono|metadata" | sort -u > analysis/libil2cpp/strings_il2cpp.txt || true
+            strings -a "$LIB" | grep -E "^[a-zA-Z_][a-zA-Z0-9_]*__[a-zA-Z0-9_]+$" | sort -u > analysis/libil2cpp/strings_methods.txt || true
+            strings -a "$LIB" | grep -E "^native[A-Z]|^nOn|^init[A-Z]|^deinit[A-Z]" | sort -u > analysis/libil2cpp/strings_native_methods.txt || true
           fi
 
       # ============================================================
-      # PHASE 2: Erweiterte ELF-Analyse mit pax-utils
+      # PHASE 2: PLT / GOT / Signal-Relocations (libunity)
       # ============================================================
-      - name: "Phase 2: pax-utils – scanelf & dumpelf"
+      - name: "Phase 2: PLT/GOT & Signal-Handler (libunity)"
+        continue-on-error: true
+        run: |
+          LIB="analysis/deadeffect/libunity.so"
+          OUT="analysis/libunity"
+          mkdir -p "$OUT"
+          [ -f "$LIB" ] || exit 0
+
+          aarch64-linux-gnu-objdump -d -j .plt "$LIB" > "$OUT/plt_full.txt" 2>&1 || true
+
+          # .rela.plt isolieren
+          awk '/Relocation section .\.rela\.plt/,/^$/' "$OUT/relocations_full.txt" \
+            > "$OUT/rela_plt.txt" || true
+
+          grep -iE 'sigaction|sigaltstack|sigemptyset|sigaddset|sigprocmask|signal@|raise@|kill@|pthread_create|__cxa_atexit' \
+            "$OUT/rela_plt.txt" > "$OUT/rela_plt_signal.txt" || true
+
+          awk '/R_AARCH64_JUMP_SLOT/ {print $1, $NF}' "$OUT/rela_plt.txt" \
+            | grep -iE 'sigaction|sigaltstack|signal@|raise@|kill@|pthread_create|__cxa_atexit' \
+            > "$OUT/got_signal_slots.txt" || true
+
+          echo "=== .rela.plt Signal-Slots ===" | tee "$OUT/phase2_summary.txt"
+          cat "$OUT/got_signal_slots.txt"  | tee -a "$OUT/phase2_summary.txt" || true
+
+      # ============================================================
+      # PHASE 3: Aufrufer von sigaction@plt / signal@plt / raise@plt
+      # ============================================================
+      - name: "Phase 3: Aufrufer von sigaction@plt etc."
+        continue-on-error: true
+        run: |
+          LIB="analysis/deadeffect/libunity.so"
+          OUT="analysis/libunity"
+          [ -f "$LIB" ] || exit 0
+
+          if [ ! -s "$OUT/disasm_full.txt" ]; then
+            aarch64-linux-gnu-objdump -d --no-show-raw-insn "$LIB" \
+              > "$OUT/disasm_full.txt" 2>&1 || true
+            echo "disasm_full.txt: $(wc -l < "$OUT/disasm_full.txt") Zeilen"
+          fi
+
+          for SYM in sigaction signal sigaltstack raise kill pthread_create __cxa_atexit; do
+            grep -nE "${SYM}@plt" "$OUT/disasm_full.txt" \
+              > "$OUT/callers_${SYM}_plt.txt" 2>&1 || true
+          done
+
+          python3 << 'PYEOF'
+          import os
+          src = 'analysis/libunity/disasm_full.txt'
+          if not os.path.exists(src):
+              raise SystemExit(0)
+          lines = open(src, 'r', errors='replace').read().splitlines()
+          for sym in ['sigaction','signal','sigaltstack','raise','kill','pthread_create']:
+              hits = [i for i, ln in enumerate(lines) if f'{sym}@plt' in ln]
+              if not hits:
+                  continue
+              with open(f'analysis/libunity/callers_{sym}_context.txt', 'w') as f:
+                  for h in hits:
+                      lo = max(0, h - 80)
+                      hi = min(len(lines), h + 40)
+                      f.write(f'\n===== {sym}@plt @Zeile {h} =====\n')
+                      f.write('\n'.join(lines[lo:hi]))
+                      f.write('\n')
+          PYEOF
+
+      # ============================================================
+      # PHASE 4: init_array vollständig auflösen
+      # ============================================================
+      - name: "Phase 4: init_array auflösen"
+        continue-on-error: true
+        run: |
+          LIB="analysis/deadeffect/libunity.so"
+          OUT="analysis/libunity"
+          [ -f "$LIB" ] || exit 0
+
+          awk '/\.init_array/ {print $5, $7; exit}' "$OUT/section_headers.txt" \
+            > "$OUT/init_array_meta.txt" 2>&1 || true
+          cat "$OUT/init_array_meta.txt" || true
+
+          python3 << 'PYEOF'
+          import re, os
+          meta_path = 'analysis/libunity/init_array_meta.txt'
+          if not os.path.exists(meta_path):
+              raise SystemExit(0)
+          meta = open(meta_path).read().split()
+          if len(meta) < 2:
+              raise SystemExit(0)
+          init_addr = int(meta[0], 16)
+          init_size = int(meta[1], 16)
+          end = init_addr + init_size
+
+          entries = []
+          for ln in open('analysis/libunity/relocations_full.txt', 'r', errors='replace'):
+              m = re.match(r'^([0-9a-f]+)\s+\S+\s+R_AARCH64_RELATIVE\s+([0-9a-f]+)', ln.strip())
+              if not m:
+                  continue
+              off, add = int(m.group(1),16), int(m.group(2),16)
+              if init_addr <= off < end:
+                  entries.append((off, add))
+
+          with open('analysis/libunity/init_array_resolved.txt', 'w') as f:
+              f.write(f'init_array: 0x{init_addr:x} .. 0x{end:x}\n')
+              f.write(f'Einträge: {len(entries)}\n\n')
+              for off, add in entries:
+                  f.write(f'offset=0x{off:x}  -> func=0x{add:x}\n')
+
+          with open('analysis/libunity/init_array_targets.txt', 'w') as f:
+              for _, add in entries:
+                  f.write(f'0x{add:x}\n')
+          PYEOF
+
+          if [ -s "$OUT/init_array_targets.txt" ]; then
+            i=0
+            while read -r A; do
+              i=$((i+1)); [ $i -gt 40 ] && break
+              H=$(echo "$A" | sed 's/0x//'); D=$((16#$H))
+              S=$(printf "0x%x" $((D-64))); E=$(printf "0x%x" $((D+512)))
+              aarch64-linux-gnu-objdump -d --start-address=$S --stop-address=$E "$LIB" \
+                > "$OUT/init_func_${i}_${H}.txt" 2>&1 || true
+            done < "$OUT/init_array_targets.txt"
+            echo "init_array Zielfunktionen disassembliert: $i"
+          fi
+
+      # ============================================================
+      # PHASE 5: JNI_OnLoad Region + Callees
+      # ============================================================
+      - name: "Phase 5: JNI_OnLoad & Callees"
+        continue-on-error: true
+        run: |
+          LIB="analysis/deadeffect/libunity.so"
+          OUT="analysis/libunity"
+          [ -f "$LIB" ] || exit 0
+
+          aarch64-linux-gnu-objdump -d --start-address=0x65c468 --stop-address=0x65c7d8 "$LIB" \
+            > "$OUT/disasm_JNI_OnLoad.txt" 2>&1 || true
+
+          grep -oE 'bl\s+[0-9a-f]+' "$OUT/disasm_JNI_OnLoad.txt" | awk '{print $2}' | sort -u \
+            > "$OUT/jni_onload_callees.txt" || true
+
+          : > "$OUT/disasm_jni_callees.txt"
+          while read -r T; do
+            [ -z "$T" ] && continue
+            S=$(printf "0x%x" $((16#$T))); E=$(printf "0x%x" $((16#$T + 512)))
+            aarch64-linux-gnu-objdump -d --start-address=$S --stop-address=$E "$LIB" \
+              >> "$OUT/disasm_jni_callees.txt" 2>&1 || true
+          done < "$OUT/jni_onload_callees.txt"
+
+          grep -nE 'blr\s+x[0-9]+|br\s+x[0-9]+' "$OUT/disasm_JNI_OnLoad.txt" \
+            > "$OUT/jni_indirect_calls.txt" || true
+
+      # ============================================================
+      # PHASE 6: JNINativeMethod-Auflösung (Kernstück)
+      # ============================================================
+      - name: "Phase 6: JNINativeMethod-Auflösung"
+        continue-on-error: true
+        run: |
+          LIB="analysis/deadeffect/libunity.so"
+          OUT="analysis/libunity"
+          [ -f "$LIB" ] || exit 0
+
+          python3 << 'PYEOF'
+          import re, os, subprocess
+
+          lib = 'analysis/deadeffect/libunity.so'
+          out = 'analysis/libunity'
+
+          methods_file = f'{out}/strings_native_methods.txt'
+          if not os.path.exists(methods_file):
+              print('strings_native_methods.txt fehlt')
+              raise SystemExit(0)
+          methods = [m.strip() for m in open(methods_file) if m.strip()]
+          print(f'Methoden zum Auflösen: {len(methods)}')
+
+          data = open(lib, 'rb').read()
+
+          # LOAD-Segmente auslesen (Datei-Offset -> vaddr)
+          r = subprocess.run(['aarch64-linux-gnu-readelf','-lW',lib],
+                             capture_output=True, text=True).stdout
+          loads = []
+          for ln in r.splitlines():
+              s = ln.strip()
+              if s.startswith('LOAD'):
+                  p = s.split()
+                  # LOAD Offset VirtAddr PhysAddr FileSiz MemSiz Flg Align
+                  off = int(p[1],16); va = int(p[2],16); fs = int(p[4],16)
+                  loads.append((off, va, fs))
+          def fo2va(fo):
+              for off, va, fs in loads:
+                  if off <= fo < off+fs:
+                      return va + (fo-off)
+              return None
+
+          # Alle R_AARCH64_RELATIVE Relocs laden
+          relocs = []
+          for ln in open(f'{out}/relocations_full.txt', 'r', errors='replace'):
+              m = re.match(r'^([0-9a-f]+)\s+\S+\s+R_AARCH64_RELATIVE\s+([0-9a-f]+)', ln.strip())
+              if m:
+                  relocs.append((int(m.group(1),16), int(m.group(2),16)))
+          print(f'R_AARCH64_RELATIVE Relocs: {len(relocs)}')
+
+          add_to_off = {}
+          off_to_add = {}
+          for off, add in relocs:
+              add_to_off.setdefault(add, []).append(off)
+              off_to_add[off] = add
+
+          results = []
+          for m in methods:
+              b = m.encode('ascii') + b'\x00'
+              idx = data.find(b)
+              if idx < 0:
+                  continue
+              va = fo2va(idx)
+              if va is None:
+                  continue
+              struct_offs = add_to_off.get(va, [])
+              for off in struct_offs:
+                  fn_off = off + 16
+                  fn_target = off_to_add.get(fn_off)
+                  results.append((m, va, off, fn_target))
+
+          with open(f'{out}/native_functions.txt', 'w') as f:
+              f.write('name\tname_va\tjnimethod_off\tfnPtr\n')
+              for m, va, off, fn in results:
+                  fn_s = f'0x{fn:x}' if fn else 'N/A'
+                  f.write(f'{m}\t0x{va:x}\t0x{off:x}\t{fn_s}\n')
+
+          with open(f'{out}/native_function_addrs.txt', 'w') as f:
+              for _,_,_,fn in results:
+                  if fn is not None:
+                      f.write(f'0x{fn:x}\n')
+
+          print(f'Aufgelöste native Methoden: {len(results)}')
+          for m, va, off, fn in results[:40]:
+              print(f'  {m:45s} fn=0x{fn:x}' if fn else f'  {m:45s} fn=N/A')
+          PYEOF
+
+          if [ -s "$OUT/native_function_addrs.txt" ]; then
+            i=0
+            while read -r A; do
+              i=$((i+1))
+              H=$(echo "$A" | sed 's/0x//'); D=$((16#$H))
+              S=$(printf "0x%x" $((D-64))); E=$(printf "0x%x" $((D+768)))
+              aarch64-linux-gnu-objdump -d --start-address=$S --stop-address=$E "$LIB" \
+                > "$OUT/native_fn_${i}_${H}.txt" 2>&1 || true
+            done < "$OUT/native_function_addrs.txt"
+            echo "native Funktionen disassembliert: $i"
+          fi
+
+          cat "$OUT/native_functions.txt" 2>/dev/null || true
+
+      # ============================================================
+      # PHASE 7: Indirekte Aufrufe in nativen Funktionen
+      # ============================================================
+      - name: "Phase 7: blr/br xN in nativen Funktionen"
+        continue-on-error: true
+        run: |
+          OUT="analysis/libunity"
+          : > "$OUT/native_indirect_calls.txt"
+          for F in "$OUT"/native_fn_*.txt; do
+            [ -f "$F" ] || continue
+            echo "### $F" >> "$OUT/native_indirect_calls.txt"
+            grep -nE 'blr\s+x[0-9]+|br\s+x[0-9]+' "$F" >> "$OUT/native_indirect_calls.txt" || true
+          done
+          head -200 "$OUT/native_indirect_calls.txt" || true
+
+      # ============================================================
+      # PHASE 8: LIEF-Kontrolle (PLT-Relocs + Signal-Symbole)
+      # ============================================================
+      - name: "Phase 8: LIEF Reloc-Kontrolle"
+        continue-on-error: true
+        run: |
+          mkdir -p analysis/lief
+          python3 << 'PYEOF'
+          import lief, os
+
+          libs = ['libunity', 'libil2cpp', 'libmain']
+          for lib in libs:
+              p = f'analysis/deadeffect/{lib}.so'
+              if not os.path.exists(p):
+                  continue
+              b = lief.parse(p)
+              if not b:
+                  continue
+              with open(f'analysis/lief/{lib}.txt','w') as f:
+                  f.write(f'=== {lib}.so ===\n')
+                  f.write(f'Format: {b.format}\n')
+                  f.write(f'Arch: {b.header.machine_type}\n')
+                  f.write(f'Entrypoint: 0x{b.entrypoint:x}\n')
+                  f.write(f'Is PIC: {b.is_pic}\n')
+                  f.write(f'Sections: {len(b.sections)}\n')
+                  f.write(f'Segments: {len(b.segments)}\n')
+                  f.write(f'Dynamic Symbols: {len(b.dynamic_symbols)}\n')
+                  f.write(f'Imported Functions: {len(b.imported_functions)}\n')
+                  f.write(f'Exported Functions: {len(b.exported_functions)}\n')
+
+                  f.write('\n=== Sections ===\n')
+                  for s in b.sections:
+                      f.write(f'{s.name:30s} addr=0x{s.virtual_address:08x} size={s.size:10d}\n')
+
+                  f.write('\n=== Imported Functions ===\n')
+                  for imp in b.imported_functions:
+                      f.write(f'{imp}\n')
+
+              # PLT-Relocs separat (nur libunity)
+              if lib == 'libunity':
+                  with open(f'analysis/lief/{lib}_relocs_check.txt','w') as f:
+                      try:
+                          plts = b.pltgot_relocations
+                      except Exception:
+                          plts = []
+                      f.write(f'PLT Relocs: {len(plts)}\n')
+                      for r in plts:
+                          s = r.symbol.name if r.has_symbol else '?'
+                          if any(k in s for k in ('sigaction','signal','sigaltstack','raise','kill','pthread_create','__cxa_atexit')):
+                              f.write(f'  0x{r.address:x}  {s}\n')
+          PYEOF
+
+      # ============================================================
+      # PHASE 9: radare2 – Symbole, Imports, Exports
+      # ============================================================
+      - name: "Phase 9: radare2 – rabin2 Symbole, Imports, Exports"
+        continue-on-error: true
+        run: |
+          mkdir -p analysis/radare2
+          for LIB in libunity libil2cpp libmain; do
+            SRC="analysis/deadeffect/${LIB}.so"
+            if [ -f "$SRC" ]; then
+              rabin2 -s "$SRC" > analysis/radare2/${LIB}_symbols.txt 2>&1 || true
+              rabin2 -i "$SRC" > analysis/radare2/${LIB}_imports.txt 2>&1 || true
+              rabin2 -E "$SRC" > analysis/radare2/${LIB}_exports.txt 2>&1 || true
+              rabin2 -l "$SRC" > analysis/radare2/${LIB}_libraries.txt 2>&1 || true
+              rabin2 -S "$SRC" > analysis/radare2/${LIB}_sections.txt 2>&1 || true
+              rabin2 -z "$SRC" > analysis/radare2/${LIB}_strings.txt 2>&1 || true
+            fi
+          done
+
+      # ============================================================
+      # PHASE 10: pax-utils – scanelf & dumpelf
+      # ============================================================
+      - name: "Phase 10: pax-utils – scanelf & dumpelf"
         continue-on-error: true
         run: |
           mkdir -p analysis/paxutils
@@ -183,105 +503,9 @@ jobs:
           done
 
       # ============================================================
-      # PHASE 3: LIEF – Detaillierte ELF-Analyse via Python
+      # PHASE 11: Zusammenfassung
       # ============================================================
-      - name: "Phase 3: LIEF – ELF-Struktur, Symbole, Relocations"
-        continue-on-error: true
-        run: |
-          mkdir -p analysis/lief
-          python3 << 'PYEOF'
-import lief
-import os
-
-libs = ['libunity', 'libil2cpp', 'libmain']
-for lib in libs:
-    path = f'analysis/deadeffect/{lib}.so'
-    if not os.path.exists(path):
-        continue
-    binary = lief.parse(path)
-    if not binary:
-        continue
-
-    with open(f'analysis/lief/{lib}.txt', 'w') as f:
-        f.write(f'=== {lib}.so ===\n')
-        f.write(f'Format:           {binary.format}\n')
-        f.write(f'Architecture:     {binary.header.machine_type}\n')
-        f.write(f'Entrypoint:       0x{binary.entrypoint:x}\n')
-        f.write(f'Is PIC:           {binary.is_pic}\n')
-        f.write(f'Sections:         {len(binary.sections)}\n')
-        f.write(f'Segments:         {len(binary.segments)}\n')
-        f.write(f'Dynamic Symbols:  {len(binary.dynamic_symbols)}\n')
-        f.write(f'Imported Functions: {len(binary.imported_functions)}\n')
-        f.write(f'Exported Functions: {len(binary.exported_functions)}\n')
-
-        f.write('\n=== Sections ===\n')
-        for s in binary.sections:
-            f.write(f'{s.name:30s} addr=0x{s.virtual_address:08x} size={s.size:10d} type={s.type}\n')
-
-        f.write('\n=== Segments ===\n')
-        for seg in binary.segments:
-            f.write(f'type={seg.type} flags={seg.flags} vaddr=0x{seg.virtual_address:08x} '
-                    f'vsize={seg.virtual_size} fsize={seg.physical_size}\n')
-
-        f.write('\n=== Imported Functions ===\n')
-        for imp in binary.imported_functions:
-            f.write(f'{imp}\n')
-
-        f.write('\n=== Exported Functions ===\n')
-        for exp in binary.exported_functions:
-            f.write(f'{exp}\n')
-
-        f.write('\n=== Dynamic Symbols (erste 500) ===\n')
-        for sym in list(binary.dynamic_symbols)[:500]:
-            f.write(f'{sym.name}  value=0x{sym.value:x}  size={sym.size}  '
-                    f'type={sym.type}  binding={sym.binding}  visibility={sym.visibility}\n')
-PYEOF
-
-      # ============================================================
-      # PHASE 4: radare2 – Symbole, Imports, Funktionen
-      # ============================================================
-      - name: "Phase 4: radare2 – rabin2 Symbole, Imports, Exports"
-        continue-on-error: true
-        run: |
-          mkdir -p analysis/radare2
-          for LIB in libunity libil2cpp libmain; do
-            SRC="analysis/deadeffect/${LIB}.so"
-            if [ -f "$SRC" ]; then
-              rabin2 -s "$SRC" > analysis/radare2/${LIB}_symbols.txt 2>&1 || true
-              rabin2 -i "$SRC" > analysis/radare2/${LIB}_imports.txt 2>&1 || true
-              rabin2 -E "$SRC" > analysis/radare2/${LIB}_exports.txt 2>&1 || true
-              rabin2 -l "$SRC" > analysis/radare2/${LIB}_libraries.txt 2>&1 || true
-              rabin2 -S "$SRC" > analysis/radare2/${LIB}_sections.txt 2>&1 || true
-              rabin2 -z "$SRC" > analysis/radare2/${LIB}_strings.txt 2>&1 || true
-            fi
-          done
-
-      - name: "Phase 4: radare2 – Funktionsanalyse (libil2cpp)"
-        continue-on-error: true
-        timeout-minutes: 20
-        run: |
-          SRC="analysis/deadeffect/libil2cpp.so"
-          if [ -f "$SRC" ]; then
-            # aaa = analyze all (functions, references, calls)
-            # afl = list all functions
-            r2 -q -c "aaa; afl" "$SRC" > analysis/radare2/libil2cpp_functions.txt 2>&1 || true
-            echo "Funktionen in libil2cpp: $(wc -l < analysis/radare2/libil2cpp_functions.txt)"
-          fi
-
-      - name: "Phase 4: radare2 – Funktionsanalyse (libunity)"
-        continue-on-error: true
-        timeout-minutes: 20
-        run: |
-          SRC="analysis/deadeffect/libunity.so"
-          if [ -f "$SRC" ]; then
-            r2 -q -c "aaa; afl" "$SRC" > analysis/radare2/libunity_functions.txt 2>&1 || true
-            echo "Funktionen in libunity: $(wc -l < analysis/radare2/libunity_functions.txt)"
-          fi
-
-      # ============================================================
-      # PHASE 5: Vergleich & Zusammenfassung
-      # ============================================================
-      - name: "Phase 5: ELF-Vergleich & Zusammenfassung"
+      - name: "Phase 11: Zusammenfassung"
         continue-on-error: true
         run: |
           {
@@ -306,6 +530,37 @@ PYEOF
             echo "--- Importierte (unaufgelöste) Symbole (erste 80) ---"
             head -80 analysis/libunity/symbols_imported.txt 2>/dev/null
             echo ""
+            echo "=== Signal-Relocations (.rela.plt) ==="
+            cat analysis/libunity/got_signal_slots.txt 2>/dev/null
+            echo ""
+            echo "=== sigaction@plt Aufrufer ==="
+            cat analysis/libunity/callers_sigaction_plt.txt 2>/dev/null || echo "(keine)"
+            echo ""
+            echo "=== signal@plt Aufrufer ==="
+            cat analysis/libunity/callers_signal_plt.txt 2>/dev/null || echo "(keine)"
+            echo ""
+            echo "=== raise@plt Aufrufer ==="
+            cat analysis/libunity/callers_raise_plt.txt 2>/dev/null || echo "(keine)"
+            echo ""
+            echo "=== init_array (Meta) ==="
+            cat analysis/libunity/init_array_meta.txt 2>/dev/null
+            echo "Einträge: $(wc -l < analysis/libunity/init_array_targets.txt 2>/dev/null)"
+            echo ""
+            echo "=== init_array Zielfunktionen (erste 40) ==="
+            head -40 analysis/libunity/init_array_targets.txt 2>/dev/null
+            echo ""
+            echo "=== JNI_OnLoad Callees ==="
+            cat analysis/libunity/jni_onload_callees.txt 2>/dev/null
+            echo ""
+            echo "=== JNI_OnLoad indirekte Aufrufe ==="
+            cat analysis/libunity/jni_indirect_calls.txt 2>/dev/null
+            echo ""
+            echo "=== JNINativeMethod-Auflösung ==="
+            cat analysis/libunity/native_functions.txt 2>/dev/null
+            echo ""
+            echo "=== Native indirekte Aufrufe (blr/br xN) – erste 100 ==="
+            head -100 analysis/libunity/native_indirect_calls.txt 2>/dev/null
+            echo ""
             echo "=== libil2cpp.so ==="
             echo "Dateigröße: $(stat -c%s analysis/deadeffect/libil2cpp.so 2>/dev/null) Bytes"
             echo "Symbole: $(wc -l < analysis/libil2cpp/symbols_all.txt 2>/dev/null)"
@@ -313,18 +568,27 @@ PYEOF
             echo "--- IL2CPP-Strings (erste 40) ---"
             head -40 analysis/libil2cpp/strings_il2cpp.txt 2>/dev/null
             echo ""
-            echo "=== LIEF: Imported Functions libunity ==="
-            grep -A 100 "=== Imported Functions ===" analysis/lief/libunity.txt 2>/dev/null | head -60
+            echo "=== LIEF: libunity Imported Functions (erste 60) ==="
+            grep -A 200 "=== Imported Functions ===" analysis/lief/libunity.txt 2>/dev/null | head -60
             echo ""
-            echo "=== radare2: libunity Imports ==="
+            echo "=== LIEF: libunity PLT Signal-Relocs ==="
+            cat analysis/lief/libunity_relocs_check.txt 2>/dev/null
+            echo ""
+            echo "=== radare2: libunity Imports (erste 60) ==="
             head -60 analysis/radare2/libunity_imports.txt 2>/dev/null
           } > analysis/summary.txt
+
+          echo "summary.txt geschrieben."
 
       - name: "Upload Analysis Results"
         uses: actions/upload-artifact@v4
         with:
           name: deadeffect-analysis
-          path: analysis/
+          path: |
+            analysis/
+            !analysis/libunity/disasm_full.txt
+            !analysis/libunity/disasm_full.txt
+            !analysis/libmain/disasm_full.txt
           retention-days: 90
 
       - name: "Display Key Findings"
@@ -333,17 +597,26 @@ PYEOF
           echo "  ANALYSE ABGESCHLOSSEN"
           echo "=========================================="
           echo ""
-          echo "=== libunity.so – Native Methoden ==="
+          echo "=== Signal-rel. PLT-Slots ==="
+          cat analysis/libunity/got_signal_slots.txt 2>/dev/null || echo "(keine)"
+          echo ""
+          echo "=== sigaction@plt Aufrufer ==="
+          cat analysis/libunity/callers_sigaction_plt.txt 2>/dev/null || echo "(keine)"
+          echo ""
+          echo "=== init_array Einträge ==="
+          wc -l analysis/libunity/init_array_targets.txt 2>/dev/null || echo "0"
+          echo ""
+          echo "=== JNINativeMethod-Auflösung (Top 40) ==="
+          head -40 analysis/libunity/native_functions.txt 2>/dev/null || echo "(keine)"
+          echo ""
+          echo "=== JNI_OnLoad Callees ==="
+          cat analysis/libunity/jni_onload_callees.txt 2>/dev/null || echo "(keine)"
+          echo ""
+          echo "=== libunity.so Native Methoden (Strings) ==="
           cat analysis/libunity/strings_native_methods.txt 2>/dev/null || echo "(keine)"
           echo ""
-          echo "=== libunity.so – UnityPlayer-Klassen ==="
+          echo "=== libunity.so UnityPlayer-Klassen ==="
           cat analysis/libunity/strings_unity_classes.txt 2>/dev/null || echo "(keine)"
           echo ""
-          echo "=== libunity.so – Importierte Symbole (erste 60) ==="
+          echo "=== libunity.so Importierte Symbole (erste 60) ==="
           head -60 analysis/libunity/symbols_imported.txt 2>/dev/null || echo "(keine)"
-          echo ""
-          echo "=== LIEF: Imported Functions libunity ==="
-          grep -A 100 "=== Imported Functions ===" analysis/lief/libunity.txt 2>/dev/null | head -40 || echo "(keine)"
-          echo ""
-          echo "=== radare2: libunity Imports ==="
-          head -40 analysis/radare2/libunity_imports.txt 2>/dev/null || echo "(keine)"
