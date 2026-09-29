@@ -25,7 +25,6 @@ log() { echo "$@" | tee -a "$BUILD_LOG" >&2; }
 log "==> GITHUB_WORKSPACE = $OUT"
 log "==> WORK             = $WORK"
 log "==> PWD              = $PWD"
-log "==> Shell-Optionen   = $-"
 
 # ------------------------------------------------------------
 log "===== STEP 1: apt ====="
@@ -72,6 +71,7 @@ cat > /usr/include/android/log.h <<'EOF'
 int __android_log_print(int prio, const char *tag, const char *fmt, ...);
 int __android_log_vprint(int prio, const char *tag, const char *fmt, va_list ap);
 int __android_log_write(int prio, const char *tag, const char *text);
+void __android_log_assert(const char *cond, const char *tag, const char *fmt, ...);
 #endif
 EOF
 cat > /usr/include/android/native_window.h <<'EOF'
@@ -159,9 +159,6 @@ done
 if [ -f "$GITHUB_WS/libs/libc++_shared.so" ]; then
     cp "$GITHUB_WS/libs/libc++_shared.so" "$WORK/de_libs/arm64-v8a/"
     log "  libc++_shared.so: $(stat -c%s "$GITHUB_WS/libs/libc++_shared.so") bytes (aus libs/)"
-else
-    log "  [INFO] libc++_shared.so nicht im Repo — muss auf dem Geraet"
-    log "         unter /roms/ports/DeadEffect/lib/ vorhanden sein."
 fi
 
 # ------------------------------------------------------------
@@ -190,7 +187,15 @@ log "Quellen:"
 ls -la "$BUILD_SRC" 2>&1 | tee -a "$BUILD_LOG"
 cd "$BUILD_SRC"
 
-CFLAGS="-D_GNU_SOURCE -O2 -fPIC -fno-omit-frame-pointer -rdynamic -Wl,-E"
+# Wichtig:
+# - --export-dynamic (-rdynamic) stellt sicher, dass dlopen/dlsym/stat
+#   im dynsym des Loaders stehen und von libunity aufgelöst werden.
+# - -Wl,-E ist der gleiche Effekt, redundant aber explizit.
+# - -fno-stack-protector für den Crash-Handler: hier absichtlich NICHT
+#   global, weil die Handler-Funktionen einzeln mit no_stack_protector
+#   markiert sind. Global würde der Stack-Canary als Sicherheitsnetz
+#   für den Rest fehlen.
+CFLAGS="-D_GNU_SOURCE -O2 -fPIC -fno-omit-frame-pointer"
 CFLAGS="$CFLAGS -DDEAD_EFFECT_LIBDIR=\"/roms/ports/DeadEffect/lib\""
 CFLAGS="$CFLAGS -DDEAD_EFFECT_ASSETS=\"/roms/ports/DeadEffect/assets\""
 CFLAGS="$CFLAGS -Wno-int-conversion -Wno-incompatible-pointer-types"
@@ -199,7 +204,9 @@ CFLAGS="$CFLAGS -Wno-deprecated-declarations -Wno-error -Wno-format"
 CFLAGS="$CFLAGS -Wno-unused-variable -Wno-unused-function -Wno-unused-parameter"
 CFLAGS="$CFLAGS -I. -I/usr/include -I/usr/aarch64-linux-gnu/include"
 CFLAGS="$CFLAGS -I/usr/include/SDL2 -I/usr/aarch64-linux-gnu/include/SDL2"
-LDFLAGS="-L/usr/aarch64-linux-gnu/lib -lSDL2 -lGLESv2 -lEGL -ldl -lm -lpthread -lstdc++ -lgcc_s -rdynamic -Wl,-E"
+
+LDFLAGS="-L/usr/aarch64-linux-gnu/lib -lSDL2 -lGLESv2 -lEGL -ldl -lm -lpthread -lstdc++ -lgcc_s"
+LDFLAGS="$LDFLAGS -rdynamic -Wl,-E -Wl,--export-dynamic"
 
 SRCS=$(ls *.c 2>/dev/null | grep -v '^main\.c$' || true)
 log "Kompiliere: $SRCS"
@@ -225,23 +232,28 @@ else
     ( aarch64-linux-gnu-gcc -o deadeffect-loader $OBJS $LDFLAGS 2>&1 | head -100 ) | tee -a "$BUILD_LOG"
 fi
 
-# ---- NEU: Inhalts-basierte Prüfung statt Größe ----
+# Prüfung: enthält der Loader die kritischen Symbole?
 LOADER_OK=0
 if [ -f deadeffect-loader ]; then
     SZ=$(stat -c%s deadeffect-loader)
     HAS_MAIN=0
     HAS_SL=0
+    HAS_DLOPEN=0
+    HAS_SO_ISH=0
     nm -D deadeffect-loader 2>/dev/null | grep -q ' T main'           && HAS_MAIN=1
     nm -D deadeffect-loader 2>/dev/null | grep -q ' T slCreateEngine' && HAS_SL=1
+    nm -D deadeffect-loader 2>/dev/null | grep -q ' T dlopen'         && HAS_DLOPEN=1
+    nm -D deadeffect-loader 2>/dev/null | grep -q ' T so_is_our_handle' && HAS_SO_ISH=1
 
-    if [ "$HAS_MAIN" = "1" ] && [ "$HAS_SL" = "1" ]; then
+    if [ "$HAS_MAIN" = "1" ] && [ "$HAS_SL" = "1" ] && \
+       [ "$HAS_DLOPEN" = "1" ] && [ "$HAS_SO_ISH" = "1" ]; then
         LOADER_OK=1
-        log "[OK] Loader gebaut ($SZ Bytes) — main + slCreateEngine vorhanden"
+        log "[OK] Loader gebaut ($SZ Bytes) — main+slCreateEngine+dlopen+so_is_our_handle"
         file deadeffect-loader | tee -a "$BUILD_LOG"
         readelf -d deadeffect-loader 2>/dev/null | grep NEEDED | tee -a "$BUILD_LOG" || true
     else
-        log "[FEHLER] Loader fehlen Kern-Symbole (main=$HAS_MAIN, slCreateEngine=$HAS_SL)"
-        nm -D deadeffect-loader 2>/dev/null | grep -E ' T (main|slCreateEngine|so_load|jni_get_env)' | tee -a "$BUILD_LOG"
+        log "[FEHLER] Kern-Symbole fehlen (main=$HAS_MAIN, slCreateEngine=$HAS_SL, dlopen=$HAS_DLOPEN, so_is_our_handle=$HAS_SO_ISH)"
+        nm -D deadeffect-loader 2>/dev/null | grep -E ' T (main|slCreateEngine|so_load|jni_get_env|dlopen|dlsym|so_is_our_handle)' | tee -a "$BUILD_LOG"
     fi
 else
     log "[FEHLER] Linken fehlgeschlagen"
@@ -271,42 +283,9 @@ chmod +x port/DeadEffect/deadeffect-loader
 [ -d "$WORK/de_libs/arm64-v8a" ] && cp "$WORK"/de_libs/arm64-v8a/*.so port/DeadEffect/lib/ 2>/dev/null || true
 
 if [ -f "$GITHUB_WS/DeadEffect.sh" ]; then
-    cp "$GITHUB_WS/DeadEffect.sh" port/DeadEffect/DeadEffect.sh
-    chmod +x port/DeadEffect/DeadEffect.sh
+    cp "$GITHUB_WS/DeadEffect.sh" port/DeadEffect.sh
+    chmod +x port/DeadEffect.sh
     log "[OK] DeadEffect.sh aus Repo uebernommen"
-else
-    log "[INFO] Keine DeadEffect.sh im Repo — Fallback wird benutzt"
-cat > port/DeadEffect/DeadEffect.sh <<'SHEOF'
-#!/bin/bash
-GAMEDIR="/roms/ports/DeadEffect"
-cd "$GAMEDIR"
-echo performance | sudo tee /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || true
-export LD_LIBRARY_PATH="$GAMEDIR/lib:$GAMEDIR:$LD_LIBRARY_PATH"
-export SDL_VIDEODRIVER=kmsdrm
-export SDL_AUDIODRIVER=alsa
-export SDL_ASSERT=always_ignore
-export MESA_GL_VERSION_OVERRIDE=3.2
-export MESA_GLSL_VERSION_OVERRIDE=320
-export PAN_MESA_DEBUG=gl3
-export MESA_NO_ERROR=1
-export MESA_LOADER_DRIVER_OVERRIDE=panfrost
-export HOME="$GAMEDIR/userdata"
-mkdir -p "$HOME" "$GAMEDIR/assets" "$GAMEDIR/lib"
-OBB=$(ls "$GAMEDIR"/main.*.com.bulkypix.deadeffect.obb 2>/dev/null | head -1)
-if [ -n "$OBB" ] && [ ! -d "$GAMEDIR/assets/bin/Data" ]; then
-    mkdir -p "$GAMEDIR/assets"
-    unzip -o -q "$OBB" -d "$GAMEDIR/assets" || true
-fi
-if command -v gptokeyb >/dev/null 2>&1; then
-    gptokeyb -k "deadeffect" -c "$GAMEDIR/de_wrapper.gptk" & GPID=$!
-    trap "kill $GPID 2>/dev/null" EXIT
-fi
-stdbuf -oL -eL ./deadeffect-loader "$GAMEDIR" 2>&1 | tee "$GAMEDIR/log.txt"
-STATUS=$?
-[ -n "${GPID:-}" ] && kill "$GPID" 2>/dev/null || true
-exit $STATUS
-SHEOF
-chmod +x port/DeadEffect/DeadEffect.sh
 fi
 
 cat > port/DeadEffect/de_wrapper.gptk <<'GPTK'
@@ -343,7 +322,6 @@ mkdir -p port/DeadEffect/debug_analysis
 cp "$BUILD_LOG" port/DeadEffect/debug_analysis/ 2>/dev/null || true
 cp "$SYMS_FILE" port/DeadEffect/debug_analysis/ 2>/dev/null || true
 cp -r "$JNI_META" port/DeadEffect/debug_analysis/ 2>/dev/null || true
-ls -la "$BUILD_SRC" > port/DeadEffect/debug_analysis/build_src.txt 2>/dev/null || true
 if [ -d "$BUILD_SRC" ]; then
     for f in "$BUILD_SRC"/*.c "$BUILD_SRC"/*.h; do
         [ -f "$f" ] && echo "===== $f =====" && cat "$f"
