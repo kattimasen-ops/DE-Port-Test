@@ -1,193 +1,189 @@
-#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdarg.h>
 #include <stdint.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <sys/mman.h>
-#include <sys/syscall.h>
-#include <sys/select.h>
 #include <time.h>
+#include <errno.h>
 #include <pthread.h>
+#include <unistd.h>
+#include <dlfcn.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <dirent.h>
 #include <android/log.h>
-#include <android/native_window.h>
-#include <android/looper.h>
-#include <android/sensor.h>
 
-int __android_log_print(int prio, const char *tag, const char *fmt, ...) {
-    va_list ap; va_start(ap, fmt);
-    fprintf(stderr, "[%s] ", tag ? tag : "?");
-    int r = vfprintf(stderr, fmt, ap);
-    fprintf(stderr, "\n"); va_end(ap); return r;
-}
-int __android_log_vprint(int prio, const char *tag, const char *fmt, va_list ap) {
-    fprintf(stderr, "[%s] ", tag ? tag : "?");
-    int r = vfprintf(stderr, fmt, ap);
-    fprintf(stderr, "\n"); return r;
-}
-int __android_log_write(int prio, const char *tag, const char *s) {
-    fprintf(stderr, "[%s] %s\n", tag ? tag : "?", s ? s : ""); return 0;
-}
-void __android_log_assert(const char *cond, const char *tag,
-                          const char *fmt, ...) {
-    va_list ap; va_start(ap, fmt);
-    fprintf(stderr, "[ASSERT] %s: ", tag ? tag : "?");
-    vfprintf(stderr, fmt, ap);
-    fprintf(stderr, " (cond: %s)\n", cond ? cond : "?");
-    va_end(ap);
-}
-void android_set_abort_message(const char *msg) {
-    fprintf(stderr, "[android_abort] %s\n", msg ? msg : "(null)");
-}
+#define TAG "deadeffect-android"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
-extern ANativeWindow *g_android_window;
-void ANativeWindow_acquire(ANativeWindow *w) { (void)w; }
-void ANativeWindow_release(ANativeWindow *w) { (void)w; }
-int32_t ANativeWindow_getWidth(ANativeWindow *w)  { return w ? w->width  : 640; }
-int32_t ANativeWindow_getHeight(ANativeWindow *w) { return w ? w->height : 480; }
-int32_t ANativeWindow_getFormat(ANativeWindow *w) { return w ? w->format : 1; }
-int32_t ANativeWindow_setBuffersGeometry(ANativeWindow *w, int32_t width, int32_t height, int32_t format) {
-    if (w) { w->width = width; w->height = height; w->format = format; }
-    return 0;
-}
+/* ================================================================
+ * ANativeWindow Fake
+ * ================================================================ */
+typedef struct ANativeWindow {
+    int width;
+    int height;
+    int format;
+    int stride;
+} ANativeWindow;
+
+static ANativeWindow g_fake_window = { 640, 480, 1, 640 };
+
 ANativeWindow *ANativeWindow_fromSurface(void *env, void *surface) {
     (void)env; (void)surface;
-    return g_android_window;
+    LOGI("ANativeWindow_fromSurface -> fake %p (%dx%d)",
+         &g_fake_window, g_fake_window.width, g_fake_window.height);
+    return &g_fake_window;
 }
 
-static int g_looper_dummy;
-static ALooper *g_looper = (ALooper *)&g_looper_dummy;
+void ANativeWindow_acquire(ANativeWindow *w) { (void)w; }
+void ANativeWindow_release(ANativeWindow *w) { (void)w; }
 
-ALooper *ALooper_prepare(int opts) { (void)opts; return g_looper; }
-ALooper *ALooper_forThread(void)   { return g_looper; }
-void ALooper_acquire(ALooper *l)   { (void)l; }
-void ALooper_release(ALooper *l)   { (void)l; }
-int ALooper_pollAll(int timeoutMillis, int *outFd, int *outEvents, void **outData) {
-    if (timeoutMillis > 0) usleep(timeoutMillis * 1000);
-    if (outFd) *outFd = -1;
-    if (outEvents) *outEvents = 0;
-    if (outData) *outData = NULL;
-    return ALOOPER_POLL_TIMEOUT;
+int ANativeWindow_getWidth(ANativeWindow *w) {
+    if (!w) return 640;
+    return w->width;
 }
-int ALooper_pollOnce(int t, int *f, int *e, void **d) { return ALooper_pollAll(t,f,e,d); }
-void ALooper_wake(ALooper *l) { (void)l; }
-int ALooper_addFd(ALooper *l, int fd, int ident, int events, ALooper_callbackFunc cb, void *data) { return 1; }
-int ALooper_removeFd(ALooper *l, int fd) { return 1; }
-
-static int g_sensor_mgr_dummy;
-static ASensorManager *g_sensor_mgr = (ASensorManager *)&g_sensor_mgr_dummy;
-
-ASensorManager *ASensorManager_getInstance(void) { return g_sensor_mgr; }
-ASensorManager *ASensorManager_getInstanceForPackage(const char *p) { (void)p; return g_sensor_mgr; }
-int ASensorManager_getSensorList(ASensorManager *m, ASensor const **list) { if (list) *list = NULL; return 0; }
-ASensor const *ASensorManager_getDefaultSensor(ASensorManager *m, int t) { (void)m; (void)t; return NULL; }
-ASensorEventQueue *ASensorManager_createEventQueue(ASensorManager *m, ALooper *l, int i, int (*cb)(int,int,void*), void *d) {
-    return (ASensorEventQueue *)calloc(1, 64);
+int ANativeWindow_getHeight(ANativeWindow *w) {
+    if (!w) return 480;
+    return w->height;
 }
-int ASensorManager_destroyEventQueue(ASensorManager *m, ASensorEventQueue *q) { free(q); return 0; }
-int ASensorEventQueue_getEvents(ASensorEventQueue *q, ASensorEvent *e, size_t n) { return 0; }
-int ASensorEventQueue_hasEvents(ASensorEventQueue *q) { return 0; }
-int ASensorEventQueue_enableSensor(ASensorEventQueue *q, ASensor const *s) { return 0; }
-int ASensorEventQueue_disableSensor(ASensorEventQueue *q, ASensor const *s) { return 0; }
-int ASensorEventQueue_setEventRate(ASensorEventQueue *q, ASensor const *s, int32_t u) { return 0; }
-int ASensor_getMinDelay(ASensor const *s) { return 0; }
-int ASensor_getType(ASensor const *s) { return 0; }
-const char *ASensor_getName(ASensor const *s) { return "stub"; }
-const char *ASensor_getVendor(ASensor const *s) { return "linux"; }
-float ASensor_getResolution(ASensor const *s) { return 1.0f; }
-
-static const char *prop_get(const char *name) {
-    if (!name) return "";
-    if (!strcmp(name, "ro.build.version.sdk"))       return "30";
-    if (!strcmp(name, "ro.build.version.release"))   return "11";
-    if (!strcmp(name, "ro.product.model"))           return "M9Pro";
-    if (!strcmp(name, "ro.product.brand"))           return "NextOS";
-    if (!strcmp(name, "ro.product.name"))            return "R36S";
-    if (!strcmp(name, "ro.product.device"))          return "rk3326";
-    if (!strcmp(name, "ro.product.manufacturer"))    return "Rockchip";
-    if (!strcmp(name, "ro.hardware"))                return "rk3326";
-    if (!strcmp(name, "ro.board.platform"))          return "rk3326";
-    if (!strcmp(name, "ro.arch"))                    return "aarch64";
-    if (!strcmp(name, "ro.kernel.qemu"))             return "0";
-    return "";
+int ANativeWindow_setBuffersGeometry(ANativeWindow *w, int width, int height, int format) {
+    (void)format;
+    if (w) { w->width = width; w->height = height; w->stride = width; }
+    LOGI("ANativeWindow_setBuffersGeometry(%d, %d)", width, height);
+    return 0;
 }
+
+/* ================================================================
+ * ALooper Fake
+ * ================================================================ */
+void *ALooper_forThread(void)     { return (void *)0x1; }
+void *ALooper_prepare(int opts)   { (void)opts; return (void *)0x1; }
+void  ALooper_acquire(void *looper) { (void)looper; }
+void  ALooper_release(void *looper) { (void)looper; }
+int   ALooper_pollAll(int timeout, int *fd, int *events, void **data) {
+    (void)timeout; (void)fd; (void)events; (void)data;
+    return -1; /* ALOOPER_POLL_TIMEOUT */
+}
+void  ALooper_wake(void *looper) { (void)looper; }
+
+/* ================================================================
+ * ASensor Fake
+ * ================================================================ */
+void *ASensorManager_getInstance(void) { return (void *)0x1; }
+void *ASensorManager_getDefaultSensor(void *mgr, int type) {
+    (void)mgr; (void)type;
+    return (void *)0x2;
+}
+void *ASensorManager_createEventQueue(void *mgr, void *looper,
+                                      int ident, void *cb, void *data) {
+    (void)mgr; (void)looper; (void)ident; (void)cb; (void)data;
+    return (void *)0x3;
+}
+int   ASensorManager_destroyEventQueue(void *mgr, void *queue) {
+    (void)mgr; (void)queue; return 0;
+}
+int   ASensorEventQueue_enableSensor(void *q, void *sensor) {
+    (void)q; (void)sensor; return 0;
+}
+int   ASensorEventQueue_disableSensor(void *q, void *sensor) {
+    (void)q; (void)sensor; return 0;
+}
+int   ASensorEventQueue_setEventRate(void *q, void *sensor, int rate) {
+    (void)q; (void)sensor; (void)rate; return 0;
+}
+int   ASensorEventQueue_hasEvents(void *q) { (void)q; return 0; }
+int   ASensorEventQueue_getEvents(void *q, void *events, int count) {
+    (void)q; (void)events; (void)count; return 0;
+}
+const char *ASensor_getName(void *sensor)       { (void)sensor; return "FakeSensor"; }
+const char *ASensor_getVendor(void *sensor)     { (void)sensor; return "Fake"; }
+int         ASensor_getType(void *sensor)       { (void)sensor; return 1; }
+float       ASensor_getResolution(void *sensor) { (void)sensor; return 1.0f; }
+int         ASensor_getMinDelay(void *sensor)   { (void)sensor; return 10000; }
+
+/* ================================================================
+ * System Properties Fake
+ * ================================================================ */
 int __system_property_get(const char *name, char *value) {
-    const char *v = prop_get(name);
-    if (value) strcpy(value, v);
-    return strlen(v);
-}
-int __system_property_read(const void *pi, char *name, char *value) {
-    if (name) name[0] = 0;
-    if (value) value[0] = 0;
-    return 0;
-}
-const void *__system_property_find(const char *name) { (void)name; return NULL; }
-int __system_property_set(const char *name, const char *value) { return 0; }
-
-int UnitySendMessage(const char *obj, const char *method, const char *msg) {
-    (void)obj; (void)method; (void)msg;
-    return 0;
+    (void)name;
+    if (value) { value[0] = '0'; value[1] = 0; }
+    return 1;
 }
 
-FILE *__sF[3] = { NULL, NULL, NULL };
-unsigned char _binary_classes_dex_start[1] = {0};
-unsigned char _binary_classes_dex_end[1]   = {0};
+/* ================================================================
+ * pthread_cond_timedwait Normalisierung
+ *
+ * Unity uebergibt absolute Zeitstempel auf Basis von CLOCK_MONOTONIC.
+ * glibc erwartet standardmaessig CLOCK_REALTIME.
+ * Diese Wrapper-Funktion rechnet um.
+ * ================================================================ */
+typedef int (*real_cond_timedwait_t)(pthread_cond_t *, pthread_mutex_t *,
+                                     const struct timespec *);
+static real_cond_timedwait_t g_real_cond_timedwait = NULL;
 
-#define AARCH64_SYS_newfstatat 79
-#define AARCH64_SYS_fstat      80
-
-#ifndef AT_FDCWD
-#define AT_FDCWD -100
-#endif
-#ifndef AT_SYMLINK_NOFOLLOW
-#define AT_SYMLINK_NOFOLLOW 0x100
-#endif
-
-int stat(const char *path, struct stat *buf) {
-    return (int)syscall(AARCH64_SYS_newfstatat, AT_FDCWD, path, buf, 0);
-}
-int lstat(const char *path, struct stat *buf) {
-    return (int)syscall(AARCH64_SYS_newfstatat, AT_FDCWD, path, buf,
-                        AT_SYMLINK_NOFOLLOW);
-}
-int fstat(int fd, struct stat *buf) {
-    return (int)syscall(AARCH64_SYS_fstat, fd, buf);
-}
-
-extern int *__errno_location(void);
-int *__errno(void) {
-    return __errno_location();
-}
-
-size_t strlcpy(char *dst, const char *src, size_t size) {
-    size_t srclen = strlen(src);
-    if (size > 0) {
-        size_t copylen = (srclen >= size) ? size - 1 : srclen;
-        memcpy(dst, src, copylen);
-        dst[copylen] = '\0';
+static void resolve_cond_timedwait(void) {
+    if (g_real_cond_timedwait) return;
+    g_real_cond_timedwait = (real_cond_timedwait_t)dlsym(RTLD_NEXT,
+                                                          "pthread_cond_timedwait");
+    if (!g_real_cond_timedwait) {
+        LOGE("pthread_cond_timedwait: dlsym fehlgeschlagen");
     }
-    return srclen;
 }
 
-void __FD_SET_chk(int fd, fd_set *set, size_t set_size) {
-    (void)set_size;
-    if (fd >= 0 && fd < FD_SETSIZE && set) FD_SET(fd, set);
-}
-int __FD_ISSET_chk(int fd, const fd_set *set, size_t set_size) {
-    (void)set_size;
-    if (fd >= 0 && fd < FD_SETSIZE && set) return FD_ISSET(fd, set);
-    return 0;
+__attribute__((visibility("default")))
+int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
+                           const struct timespec *abstime) {
+    resolve_cond_timedwait();
+    if (!g_real_cond_timedwait)
+        return ETIMEDOUT;
+
+    if (!abstime)
+        return g_real_cond_timedwait(cond, mutex, NULL);
+
+    /* Absolute Zeit in relative Zeit umrechnen */
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+
+    /* Wenn abstime weit in der Zukunft liegt (> 1 Jahr),
+     * behandeln wir es als CLOCK_REALTIME-Interpretation
+     * und korrigieren. Andernfalls nutzen wir es direkt. */
+    time_t sec_diff = abstime->tv_sec - now.tv_sec;
+    if (sec_diff < 0) {
+        /* Timeout bereits abgelaufen */
+        return ETIMEDOUT;
+    }
+
+    struct timespec rel;
+    rel.tv_sec  = abstime->tv_sec  - now.tv_sec;
+    rel.tv_nsec = abstime->tv_nsec - now.tv_nsec;
+    if (rel.tv_nsec < 0) {
+        rel.tv_sec  -= 1;
+        rel.tv_nsec += 1000000000L;
+    }
+
+    /* Umrechnung auf absolute CLOCK_REALTIME-Zeit fuer glibc */
+    struct timespec real_now;
+    clock_gettime(CLOCK_REALTIME, &real_now);
+    struct timespec real_abs;
+    real_abs.tv_sec  = real_now.tv_sec  + rel.tv_sec;
+    real_abs.tv_nsec = real_now.tv_nsec + rel.tv_nsec;
+    if (real_abs.tv_nsec >= 1000000000L) {
+        real_abs.tv_sec  += 1;
+        real_abs.tv_nsec -= 1000000000L;
+    }
+
+    return g_real_cond_timedwait(cond, mutex, &real_abs);
 }
 
-extern int __register_atfork(void (*prepare)(void),
-                             void (*parent)(void),
-                             void (*child)(void),
-                             void *dso_handle);
-int pthread_atfork(void (*prepare)(void),
-                   void (*parent)(void),
-                   void (*child)(void)) {
-    return __register_atfork(prepare, parent, child, NULL);
+/* ================================================================
+ * Fortify-Wrapper (verhindern Endlosrekursion)
+ * ================================================================ */
+int __fdelt_chk(int fd) {
+    if (fd < 0 || fd >= 1024) return fd % 1024;
+    return fd / 64;
 }
+
+/* ================================================================
+ * __android_log_print ist in liblog, wir linken direkt
+ * ================================================================ */
