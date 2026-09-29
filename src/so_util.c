@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <dlfcn.h>
 #include <signal.h>
+#include <pthread.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
@@ -33,6 +34,8 @@ extern int  de_sigaction(int, const struct sigaction *, struct sigaction *);
 extern void (*de_signal(int, void (*)(int)))(int);
 extern void *de_dlsym(void *, const char *);
 extern void *de_dlopen(const char *, int);
+extern int  de_pthread_create(pthread_t *, const pthread_attr_t *,
+                              void *(*)(void *), void *);
 
 typedef struct {
     void *base;
@@ -76,10 +79,11 @@ static int heap_sane_check(const char *when) {
 
 static void *resolve_symbol_full(const char *name) {
     /* --- Intercepts für libunity --- */
-    if (strcmp(name, "sigaction") == 0)  return (void *)de_sigaction;
-    if (strcmp(name, "signal")    == 0)  return (void *)de_signal;
-    if (strcmp(name, "dlsym")     == 0)  return (void *)de_dlsym;
-    if (strcmp(name, "dlopen")    == 0)  return (void *)de_dlopen;
+    if (strcmp(name, "sigaction")      == 0) return (void *)de_sigaction;
+    if (strcmp(name, "signal")         == 0) return (void *)de_signal;
+    if (strcmp(name, "dlsym")          == 0) return (void *)de_dlsym;
+    if (strcmp(name, "dlopen")         == 0) return (void *)de_dlopen;
+    if (strcmp(name, "pthread_create") == 0) return (void *)de_pthread_create;
 
     /* --- Eigene Module durchsuchen --- */
     for (int i = 0; i < g_nmods; i++) {
