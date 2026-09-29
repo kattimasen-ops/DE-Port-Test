@@ -30,12 +30,13 @@
  *
  * - Fester, statisch allokierter Stack (sigaltstack), damit wir
  *   nicht vom bereits korrupten Thread-Stack abhaengig sind.
- * - no_stack_protector: verhindert, dass der Canary-Check
- *   im Handler selbst einen zweiten SIGSEGV ausloest.
+ * - Der Build setzt -fno-stack-protector global, damit der
+ *   Canary-Check im Handler keinen zweiten SIGSEGV ausloest.
+ *   (GCC 9 aarch64 ignoriert __attribute__((no_stack_protector)))
  * - Nur write() und statische Buffer, kein malloc/fprintf.
  * ============================================================ */
 
-__attribute__((no_stack_protector, noinline))
+__attribute__((noinline))
 static int fmt_hex(uint64_t v, char *out) {
     const char *hx = "0123456789abcdef";
     int n = 0;
@@ -52,7 +53,7 @@ static int fmt_hex(uint64_t v, char *out) {
     return n;
 }
 
-__attribute__((no_stack_protector, noinline))
+__attribute__((noinline))
 static int fmt_dec(int v, char *out) {
     char tmp[16];
     int n = 0;
@@ -67,7 +68,7 @@ static int fmt_dec(int v, char *out) {
     return n;
 }
 
-__attribute__((no_stack_protector, noinline))
+__attribute__((noinline))
 static void safe_write(const char *s) {
     size_t len = 0;
     while (s[len]) len++;
@@ -75,7 +76,7 @@ static void safe_write(const char *s) {
     (void)r;
 }
 
-__attribute__((no_stack_protector, noinline))
+__attribute__((noinline))
 static void crash_handler(int sig, siginfo_t *info, void *uctx) {
     ucontext_t *uc = (ucontext_t *)uctx;
     char hexbuf[24];
@@ -158,7 +159,7 @@ static SDL_Window   *sdl_win = NULL;
 static SDL_GLContext sdl_ctx = NULL;
 static EGLDisplay    egl_dpy = EGL_NO_DISPLAY;
 static EGLSurface    egl_surf = EGL_NO_SURFACE;
-static EGLContext    egl_ctx = EGL_NO_CONTEXT;
+static EGLContext    egl_ctx  = EGL_NO_CONTEXT;
 
 /* ============================================================
  * Heap-Sanity
@@ -281,9 +282,7 @@ static int load_module_chain(void) {
     }
     LOGI("NativeLoader.load OK");
 
-    /* Handle auf libunity besorgen: NativeLoader hat es bereits
-     * geladen, aber wir kennen den Zeiger nicht. Sicherheitshalber
-     * prüfen, ob es im dlopen-Hook gelandet ist. */
+    /* UnityMain-Native aus der JNI-Registry holen. */
     const char *UP = "com/unity3d/player/UnityPlayer";
     unity_main_fn      = (UnityMain_t)   jni_find_native(UP, "UnityMain");
     unity_native_pause = (nativePause_t) jni_find_native(UP, "nativePause");
