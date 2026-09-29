@@ -19,6 +19,9 @@
 #include "so_util.h"
 #include "jni_shim.h"
 
+/* Adresse unseres echten Crash-Handlers an den sigaction-Intercept */
+extern void (*g_de_crash_handler)(int, siginfo_t *, void *);
+
 #define TAG "deadeffect"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
@@ -366,6 +369,10 @@ int main(int argc, char **argv) {
     prctl(PR_SET_DUMPABLE, 1, 0, 0, 0);
     struct rlimit rl = { RLIM_INFINITY, RLIM_INFINITY };
     setrlimit(RLIMIT_CORE, &rl);
+
+    /* Unseren Handler an den sigaction-Intercept bekannt machen,
+     * BEVOR irgendetwas installiert wird oder libunity lädt. */
+    g_de_crash_handler = crash_handler;
 
     install_crash_handler();
 
