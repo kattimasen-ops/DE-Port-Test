@@ -54,7 +54,7 @@ int __android_log_write(int prio, const char *tag, const char *text) {
 }
 
 /* ------------------------------------------------------------ */
-/* sigaction / signal Intercept                                  */
+/* sigaction / signal Intercept (jetzt mit Caller-Logging)       */
 /* ------------------------------------------------------------ */
 static int is_protected_signal(int sig) {
     return sig == SIGSEGV || sig == SIGBUS || sig == SIGILL ||
@@ -65,9 +65,10 @@ __attribute__((visibility("default")))
 int de_sigaction(int signum, const struct sigaction *act,
                  struct sigaction *oldact)
 {
+    void *caller = __builtin_return_address(0);
     if (is_protected_signal(signum) && act) {
-        LOGI("[sigaction] BLOCKIERT signum=%d (behalte %p)",
-             signum, (void *)g_de_crash_handler);
+        LOGI("[sigaction] BLOCKIERT signum=%d caller=%p (behalte %p)",
+             signum, caller, (void *)g_de_crash_handler);
         if (oldact) {
             memset(oldact, 0, sizeof(*oldact));
             oldact->sa_sigaction = g_de_crash_handler;
@@ -75,6 +76,7 @@ int de_sigaction(int signum, const struct sigaction *act,
         }
         return 0;
     }
+    LOGI("[sigaction] durchreichen signum=%d caller=%p", signum, caller);
     return (int)syscall(SYS_rt_sigaction, signum, act, oldact,
                         (long)sizeof(sigset_t));
 }
@@ -83,8 +85,9 @@ typedef void (*sighandler_t)(int);
 
 __attribute__((visibility("default")))
 sighandler_t de_signal(int signum, sighandler_t handler) {
+    void *caller = __builtin_return_address(0);
     if (is_protected_signal(signum)) {
-        LOGI("[signal] BLOCKIERT signum=%d", signum);
+        LOGI("[signal] BLOCKIERT signum=%d caller=%p", signum, caller);
         return SIG_DFL;
     }
     struct sigaction sa, old;
@@ -99,65 +102,58 @@ sighandler_t de_signal(int signum, sighandler_t handler) {
 }
 
 /* ------------------------------------------------------------ */
-/* dlsym / dlopen Intercept                                      */
+/* dlsym / dlopen Intercept (mit Caller)                         */
 /* ------------------------------------------------------------ */
 extern void *__libc_dlsym(void *, const char *);
 extern void *__libc_dlopen_mode(const char *, int);
 
 __attribute__((visibility("default")))
 void *de_dlsym(void *handle, const char *symbol) {
+    void *caller = __builtin_return_address(0);
     void *ret = __libc_dlsym(handle, symbol);
-    LOGI("[dlsym] %s -> %p", symbol ? symbol : "?", ret);
+    LOGI("[dlsym] handle=%p sym=%s -> %p (caller=%p)",
+         handle, symbol ? symbol : "?", ret, caller);
     return ret;
 }
 
 __attribute__((visibility("default")))
 void *de_dlopen(const char *path, int flags) {
+    void *caller = __builtin_return_address(0);
     void *ret = __libc_dlopen_mode(path, flags);
-    LOGI("[dlopen] %s (flags=0x%x) -> %p", path ? path : "?", flags, ret);
+    LOGI("[dlopen] %s (flags=0x%x) -> %p (caller=%p)",
+         path ? path : "?", flags, ret, caller);
     return ret;
 }
 
 /* ------------------------------------------------------------ */
-/* pthread_create Intercept                                      */
+/* eglGetProcAddress Intercept                                   */
 /*                                                               */
-/* Das ist der eigentliche Täter: libunity spawnt einen Thread   */
-/* mit start_routine==NULL. Wir blockieren das und loggen den    */
-/* Caller, damit wir den aufrufenden Code auflösen können.       */
+/* Unity sucht nach GL-Funktionen ueber eglGetProcAddress. Wenn  */
+/* eine davon NULL zurueckkommt und Unity sie ungeprueft         */
+/* speichert, ist der spaetere Aufruf ein Sprung nach 0.         */
 /* ------------------------------------------------------------ */
-typedef int (*real_pthread_create_t)(pthread_t *, const pthread_attr_t *,
-                                     void *(*)(void *), void *);
-static real_pthread_create_t g_real_pthread_create = NULL;
-
-static void resolve_real_pthread_create(void) {
-    if (g_real_pthread_create) return;
-    g_real_pthread_create = (real_pthread_create_t)dlsym(RTLD_NEXT,
-                                                          "pthread_create");
-    if (!g_real_pthread_create) {
-        LOGE("[pthread_create] RTLD_NEXT dlsym fehlgeschlagen");
-    }
-}
+typedef void *(*egl_get_proc_t)(const char *);
+static egl_get_proc_t g_real_egl_get_proc = NULL;
+static int g_real_egl_tried = 0;
 
 __attribute__((visibility("default")))
-int de_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
-                      void *(*start_routine)(void *), void *arg)
-{
-    void *caller = __builtin_return_address(0);
-    LOGI("[pthread_create] thread=%p attr=%p start_routine=%p arg=%p caller=%p",
-         (void *)thread, (const void *)attr, (void *)start_routine, arg, caller);
-
-    if (!start_routine) {
-        LOGE("[pthread_create] *** start_routine ist NULL — BLOCKIERT ***");
-        LOGE("[pthread_create] Caller war: %p", caller);
-        return EINVAL;
+void *eglGetProcAddress(const char *procname) {
+    if (!g_real_egl_tried) {
+        g_real_egl_tried = 1;
+        /* direkt per dlsym(RTLD_NEXT) - umgeht unsere eigene Interposition */
+        g_real_egl_get_proc = (egl_get_proc_t)dlsym(RTLD_NEXT, "eglGetProcAddress");
+        if (!g_real_egl_get_proc) {
+            LOGE("[eglGetProcAddress] RTLD_NEXT fehlgeschlagen");
+        }
     }
-    resolve_real_pthread_create();
-    if (!g_real_pthread_create) return EAGAIN;
-    return g_real_pthread_create(thread, attr, start_routine, arg);
+    void *ret = NULL;
+    if (g_real_egl_get_proc) ret = g_real_egl_get_proc(procname);
+    LOGI("[eglGetProcAddress] %s -> %p", procname ? procname : "?", ret);
+    return ret;
 }
 
 /* ------------------------------------------------------------ */
-/* __sF — bionics FILE-Array (nur damit das Symbol existiert)    */
+/* __sF                                                          */
 /* ------------------------------------------------------------ */
 void *__sF[3] = { NULL, NULL, NULL };
 
@@ -308,6 +304,27 @@ int fstat(int fd, struct stat *buf) {
 /* ------------------------------------------------------------ */
 int pthread_atfork(void (*p)(void), void (*q)(void), void (*c)(void)) {
     (void)p; (void)q; (void)c; return 0;
+}
+
+/* ------------------------------------------------------------ */
+/* pthread_create passthrough (KEIN Intercept mehr)              */
+/* ------------------------------------------------------------ */
+__attribute__((visibility("default")))
+int de_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+                      void *(*start_routine)(void *), void *arg)
+{
+    void *caller = __builtin_return_address(0);
+    LOGI("[pthread_create] start_routine=%p arg=%p caller=%p",
+         (void *)start_routine, arg, caller);
+    if (!start_routine) {
+        LOGE("[pthread_create] *** NULL start_routine — BLOCKIERT ***");
+        return EINVAL;
+    }
+    typedef int (*real_t)(pthread_t *, const pthread_attr_t *,
+                          void *(*)(void *), void *);
+    real_t real = (real_t)dlsym(RTLD_NEXT, "pthread_create");
+    if (!real) return EAGAIN;
+    return real(thread, attr, start_routine, arg);
 }
 
 /* ------------------------------------------------------------ */
