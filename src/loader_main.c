@@ -1,11 +1,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <unistd.h>
 #include <dlfcn.h>
 #include <signal.h>
 #include <ucontext.h>
 #include <pthread.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/prctl.h>
+#include <sys/resource.h>
 #include <SDL2/SDL.h>
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
@@ -24,7 +29,13 @@
 #ifndef DEAD_EFFECT_ASSETS
 #define DEAD_EFFECT_ASSETS "/roms/ports/DeadEffect/assets"
 #endif
+#ifndef DEAD_EFFECT_CRASHLOG
+#define DEAD_EFFECT_CRASHLOG "/roms/ports/DeadEffect/crash.txt"
+#endif
 
+/* ------------------------------------------------------------ */
+/* Rohe, signal-sichere Ausgabe                                 */
+/* ------------------------------------------------------------ */
 __attribute__((noinline))
 static void rawlog(const char *s) {
     size_t n = 0;
@@ -32,107 +43,100 @@ static void rawlog(const char *s) {
     if (n) { ssize_t r = write(2, s, n); (void)r; }
 }
 
-static int fmt_hex(uint64_t v, char *out) {
+/* Schreibt einen String sowohl auf stderr als auch in crash.txt. */
+__attribute__((noinline))
+static void crash_write(const char *s) {
+    size_t n = 0;
+    while (s[n]) n++;
+    if (!n) return;
+    ssize_t r = write(2, s, n); (void)r;
+    int fd = open(DEAD_EFFECT_CRASHLOG,
+                  O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd >= 0) {
+        ssize_t r2 = write(fd, s, n); (void)r2;
+        close(fd);
+    }
+}
+
+static void crash_write_hex(uint64_t v) {
+    char buf[20];
     const char *hx = "0123456789abcdef";
-    int n = 0; out[n++] = '0'; out[n++] = 'x'; int started = 0;
+    int n = 0;
+    buf[n++] = '0'; buf[n++] = 'x';
+    int started = 0;
     for (int i = 15; i >= 0; i--) {
         int nib = (v >> (i * 4)) & 0xF;
-        if (nib || started || i == 0) { out[n++] = hx[nib]; started = 1; }
+        if (nib || started || i == 0) {
+            buf[n++] = hx[nib];
+            started = 1;
+        }
     }
-    out[n] = 0; return n;
+    buf[n] = 0;
+    crash_write(buf);
 }
 
-static int fmt_dec(int v, char *out) {
-    char tmp[16]; int n = 0;
-    if (v < 0) { out[n++] = '-'; v = -v; }
-    if (v == 0) { out[n++] = '0'; out[n] = 0; return n; }
-    while (v > 0) { tmp[n++] = '0' + (v % 10); v /= 10; }
-    for (int i = 0; i < n / 2; i++) {
-        char t = tmp[i]; tmp[i] = tmp[n - 1 - i]; tmp[n - 1 - i] = t;
-    }
-    for (int i = 0; i < n; i++) out[i] = tmp[i];
-    out[n] = 0; return n;
+static void crash_write_dec(int v) {
+    char t[16];
+    int n = 0;
+    if (v < 0) { crash_write("-"); v = -v; }
+    if (v == 0) { crash_write("0"); return; }
+    while (v > 0 && n < 15) { t[n++] = '0' + (v % 10); v /= 10; }
+    char o[16];
+    for (int i = 0; i < n; i++) o[i] = t[n - 1 - i];
+    o[n] = 0;
+    crash_write(o);
 }
 
-static void safe_write(const char *s) {
-    size_t len = 0; while (s[len]) len++;
-    ssize_t r = write(2, s, len); (void)r;
-}
-
-static void dump_fp_chain(uint64_t fp, uint64_t pc, uint64_t lr) {
-    char buf[128]; int n;
-    safe_write("\n### BACKTRACE (FP chain) ###\n");
-    for (int i = 0; i < 24; i++) {
-        n = 0; buf[n++] = ' '; buf[n++] = '#';
-        if (i >= 10) buf[n++] = '0' + (i / 10);
-        buf[n++] = '0' + (i % 10); buf[n++] = ' ';
-        if (i == 0) {
-            const char *p = "PC="; while (*p) buf[n++] = *p++;
-            fmt_hex(pc, buf + n); while (buf[n]) n++;
-            p = " LR="; while (*p) buf[n++] = *p++;
-            fmt_hex(lr, buf + n); while (buf[n]) n++;
-            p = " FP="; while (*p) buf[n++] = *p++;
-            fmt_hex(fp, buf + n); while (buf[n]) n++;
-        } else if (fp && fp >= 0x1000 && (fp & 7) == 0) {
-            volatile uint64_t *q = (volatile uint64_t *)fp;
-            uint64_t next_fp = q[0]; uint64_t ret_lr = q[1];
-            const char *p = "LR="; while (*p) buf[n++] = *p++;
-            fmt_hex(ret_lr, buf + n); while (buf[n]) n++;
-            p = " FP="; while (*p) buf[n++] = *p++;
-            fmt_hex(next_fp, buf + n); while (buf[n]) n++;
-            if (next_fp <= fp || (next_fp & 7) != 0) fp = 0; else fp = next_fp;
-        } else break;
-        buf[n++] = '\n'; buf[n] = 0;
-        safe_write(buf);
-    }
-    safe_write("### END BACKTRACE ###\n");
-}
-
+/* ------------------------------------------------------------ */
+/* Crash-Handler: minimal, ohne FP-Walk                          */
+/* ------------------------------------------------------------ */
 __attribute__((noinline))
 static void crash_handler(int sig, siginfo_t *info, void *uctx) {
+    /* ERSTE Ausgabe, bevor irgendetwas schiefgehen kann */
+    crash_write("\n### SIG=");
+    crash_write_dec(sig);
+    crash_write(" ###\n");
+
     if (!uctx) {
-        safe_write("\n### SIGNAL but uctx=NULL ###\n");
+        crash_write("### ucontext=NULL ###\n");
         _exit(128 + sig);
     }
     ucontext_t *uc = (ucontext_t *)uctx;
-    char hexbuf[24];
-    char decbuf[16];
-    char line[512];
-    int n = 0;
-    const char *hdr = "\n### SIGNAL "; while (*hdr) line[n++] = *hdr++;
-    fmt_dec(sig, decbuf); for (int i = 0; decbuf[i]; i++) line[n++] = decbuf[i];
-    uint64_t pc   = (uint64_t)uc->uc_mcontext.pc;
-    uint64_t sp   = (uint64_t)uc->uc_mcontext.sp;
-    uint64_t fp   = (uint64_t)uc->uc_mcontext.regs[29];
-    uint64_t lr   = (uint64_t)uc->uc_mcontext.regs[30];
-    uint64_t addr = (uint64_t)(info ? info->si_addr : 0);
-    const char *p;
-    p = " PC=";   while (*p) line[n++] = *p++; fmt_hex(pc, hexbuf);   for (int i = 0; hexbuf[i]; i++) line[n++] = hexbuf[i];
-    p = " SP=";   while (*p) line[n++] = *p++; fmt_hex(sp, hexbuf);   for (int i = 0; hexbuf[i]; i++) line[n++] = hexbuf[i];
-    p = " FP=";   while (*p) line[n++] = *p++; fmt_hex(fp, hexbuf);   for (int i = 0; hexbuf[i]; i++) line[n++] = hexbuf[i];
-    p = " LR=";   while (*p) line[n++] = *p++; fmt_hex(lr, hexbuf);   for (int i = 0; hexbuf[i]; i++) line[n++] = hexbuf[i];
-    p = " ADDR="; while (*p) line[n++] = *p++; fmt_hex(addr, hexbuf); for (int i = 0; hexbuf[i]; i++) line[n++] = hexbuf[i];
-    p = " ###\n"; while (*p) line[n++] = *p++;
-    line[n] = 0;
-    safe_write(line);
-    n = 0;
-    const char *pr = "### REGS x0=";
-    while (*pr) line[n++] = *pr++;
-    fmt_hex((uint64_t)uc->uc_mcontext.regs[0], hexbuf);
-    for (int i = 0; hexbuf[i]; i++) line[n++] = hexbuf[i];
-    pr = " x1="; while (*pr) line[n++] = *pr++;
-    fmt_hex((uint64_t)uc->uc_mcontext.regs[1], hexbuf);
-    for (int i = 0; hexbuf[i]; i++) line[n++] = hexbuf[i];
-    pr = " x2="; while (*pr) line[n++] = *pr++;
-    fmt_hex((uint64_t)uc->uc_mcontext.regs[2], hexbuf);
-    for (int i = 0; hexbuf[i]; i++) line[n++] = hexbuf[i];
-    pr = " x3="; while (*pr) line[n++] = *pr++;
-    fmt_hex((uint64_t)uc->uc_mcontext.regs[3], hexbuf);
-    for (int i = 0; hexbuf[i]; i++) line[n++] = hexbuf[i];
-    pr = " ###\n"; while (*pr) line[n++] = *pr++;
-    line[n] = 0;
-    safe_write(line);
-    dump_fp_chain(fp, pc, lr);
+
+    crash_write("### PC=");
+    crash_write_hex((uint64_t)uc->uc_mcontext.pc);
+    crash_write(" SP=");
+    crash_write_hex((uint64_t)uc->uc_mcontext.sp);
+    crash_write(" FP=");
+    crash_write_hex((uint64_t)uc->uc_mcontext.regs[29]);
+    crash_write(" LR=");
+    crash_write_hex((uint64_t)uc->uc_mcontext.regs[30]);
+    crash_write(" ADDR=");
+    crash_write_hex((uint64_t)(info ? info->si_addr : 0));
+    crash_write(" ###\n");
+
+    crash_write("### REGS x0=");
+    crash_write_hex((uint64_t)uc->uc_mcontext.regs[0]);
+    crash_write(" x1=");
+    crash_write_hex((uint64_t)uc->uc_mcontext.regs[1]);
+    crash_write(" x2=");
+    crash_write_hex((uint64_t)uc->uc_mcontext.regs[2]);
+    crash_write(" x3=");
+    crash_write_hex((uint64_t)uc->uc_mcontext.regs[3]);
+    crash_write(" ###\n");
+
+    crash_write("### x19=");
+    crash_write_hex((uint64_t)uc->uc_mcontext.regs[19]);
+    crash_write(" x20=");
+    crash_write_hex((uint64_t)uc->uc_mcontext.regs[20]);
+    crash_write(" x21=");
+    crash_write_hex((uint64_t)uc->uc_mcontext.regs[21]);
+    crash_write(" x29=");
+    crash_write_hex((uint64_t)uc->uc_mcontext.regs[29]);
+    crash_write(" ###\n");
+
+    /* KEIN FP-Walk - der kann im Handler selbst faulten. */
+    crash_write("### END (no FP-walk) ###\n");
     _exit(128 + sig);
 }
 
@@ -145,10 +149,11 @@ static void install_crash_handler(void) {
     ss.ss_size  = sizeof(g_alt_stack);
     ss.ss_flags = 0;
     sigaltstack(&ss, NULL);
+
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = crash_handler;
-    sa.sa_flags     = SA_SIGINFO | SA_ONSTACK;
+    sa.sa_flags     = SA_SIGINFO | SA_ONSTACK | SA_RESETHAND;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, NULL);
     sigaction(SIGBUS,  &sa, NULL);
@@ -157,17 +162,30 @@ static void install_crash_handler(void) {
     sigaction(SIGABRT, &sa, NULL);
 }
 
+/* Verifikation: ist wirklich unser Handler aktiv? */
+static void verify_sigsegv_handler(const char *where) {
+    struct sigaction cur;
+    memset(&cur, 0, sizeof(cur));
+    if (sigaction(SIGSEGV, NULL, &cur) != 0) {
+        LOGI("[verify/%s] sigaction-Abfrage fehlgeschlagen", where);
+        return;
+    }
+    LOGI("[verify/%s] SIGSEGV handler=%p erwartet=%p flags=0x%x",
+         where, (void *)cur.sa_sigaction, (void *)crash_handler,
+         (unsigned)cur.sa_flags);
+}
+
 static void *crash_handler_watchdog(void *arg) {
     (void)arg;
     for (;;) {
         install_crash_handler();
-        usleep(10000);
+        usleep(2000); /* 2 ms */
     }
     return NULL;
 }
 
 void abort(void) {
-    safe_write("\n### ABORT() AUFGERUFEN ###\n");
+    rawlog("\n### ABORT() AUFGERUFEN ###\n");
     _exit(134);
 }
 
@@ -176,14 +194,6 @@ void *g_libmain_handle   = NULL;
 void *g_libunity_handle  = NULL;
 void *g_libil2cpp_handle = NULL;
 
-/* -----------------------------------------------------------------
- * Fake UnityPlayer-Objekt (dient als `thiz` fuer alle nativen Methoden)
- *
- * Wichtig: Der erste 8-Byte-Block eines Java-Objekts ist normalerweise
- * der Zeiger auf die Klasse (object header). libunity liest diesen
- * Header bei manchen Methoden aus. `class_ref` wird deshalb auf einen
- * stabilen, nicht-NULL Zeiger gesetzt.
- * ----------------------------------------------------------------- */
 static struct {
     void *class_ref;
     uint8_t payload[512];
@@ -334,150 +344,5 @@ static int load_module_chain(void) {
         return -1;
     }
 
-    /* -----------------------------------------------------------------
-     * FIX: initJni MUSS mit ZWEI gueltigen Objekten aufgerufen werden.
-     *
-     * Belegt durch DT-Disassembly (c728-c74c):
-     *   initJni(env, activity, activity)
-     *
-     * In der echten Android-Runtime ist thiz das UnityPlayer-Objekt
-     * und context die Activity. In der Fake-Umgebung duerfen beide
-     * gleich sein, aber KEINES darf NULL sein.
-     * ----------------------------------------------------------------- */
     void *env = jni_get_env();
-    LOGI("Rufe initJni(env=%p, thiz=%p, context=%p)",
-         env, g_unity_player_thiz, g_unity_player_thiz);
-    unity_init_jni(env, g_unity_player_thiz, g_unity_player_thiz);
-    LOGI("initJni OK");
-    return 0;
-}
-
-static void arm_crash_handler(const char *what) {
-    install_crash_handler();
-    LOGI("[arm] crash handler installiert vor %s", what);
-}
-
-int main(int argc, char **argv) {
-    (void)argc; (void)argv;
-    rawlog("[boot] main() entered\n");
-    install_crash_handler();
-
-    LOGI("Dead Effect Loader startet");
-    LOGI("  libdir = %s", DEAD_EFFECT_LIBDIR);
-    LOGI("  assets = %s", DEAD_EFFECT_ASSETS);
-
-    jni_shim_init();
-    jni_install_android_contract();
-    rawlog("[boot] jni_shim_init + contract done\n");
-
-    g_fake_unity_player_obj.class_ref = &g_fake_unity_player_obj;
-    LOGI("Fake-UnityPlayer-Objekt vorbereitet: thiz=%p class_ref=%p",
-         g_unity_player_thiz, g_fake_unity_player_obj.class_ref);
-
-    preload_libcxx();
-    rawlog("[boot] preload_libcxx done\n");
-
-    rawlog("[boot] video_init...\n");
-    if (video_init() != 0) { rawlog("[boot] video_init failed\n"); return 1; }
-    rawlog("[boot] video_init done\n");
-
-    rawlog("[boot] load_module_chain...\n");
-    if (load_module_chain() != 0) { rawlog("[boot] load_module_chain failed\n"); return 1; }
-    rawlog("[boot] load_module_chain done\n");
-
-    rawlog("[boot] starting crash handler watchdog...\n");
-    pthread_t watchdog;
-    if (pthread_create(&watchdog, NULL, crash_handler_watchdog, NULL) != 0) {
-        rawlog("[boot] WARN: watchdog thread creation failed\n");
-    } else {
-        rawlog("[boot] watchdog thread started\n");
-    }
-
-    jni_shim_set_egl(egl_dpy, egl_surf, egl_ctx);
-    void *env = jni_get_env();
-
-    LOGI("g_unity_player_thiz = %p (statisches Objekt, 512+ Bytes)", g_unity_player_thiz);
-
-    /* === nativeSendSurfaceChangedEvent === */
-    if (unity_native_surface_changed) {
-        arm_crash_handler("nativeSendSurfaceChangedEvent");
-        LOGI("Rufe nativeSendSurfaceChangedEvent(env=%p, thiz=%p, 640, 480)",
-             env, g_unity_player_thiz);
-        unity_native_surface_changed(env, g_unity_player_thiz, 640, 480);
-        LOGI("nativeSendSurfaceChangedEvent OK");
-    } else {
-        LOGI("[WARN] nativeSendSurfaceChangedEvent nicht gefunden");
-    }
-
-    if (unity_native_recreate_gfx_state) {
-        arm_crash_handler("nativeRecreateGfxState");
-        LOGI("Rufe nativeRecreateGfxState(env=%p, thiz=%p, 0, NULL)",
-             env, g_unity_player_thiz);
-        unity_native_recreate_gfx_state(env, g_unity_player_thiz, 0, NULL);
-        LOGI("nativeRecreateGfxState OK");
-    } else {
-        LOGI("[WARN] nativeRecreateGfxState nicht gefunden");
-    }
-
-    if (unity_native_focus_change) {
-        arm_crash_handler("nativeFocusChanged");
-        LOGI("Rufe nativeFocusChanged(env=%p, thiz=%p, true)",
-             env, g_unity_player_thiz);
-        unity_native_focus_change(env, g_unity_player_thiz, 1);
-        LOGI("nativeFocusChanged OK");
-    } else {
-        LOGI("[WARN] nativeFocusChanged nicht gefunden");
-    }
-
-    if (unity_native_resume) {
-        arm_crash_handler("nativeResume");
-        LOGI("Rufe nativeResume(env=%p, thiz=%p)", env, g_unity_player_thiz);
-        unity_native_resume(env, g_unity_player_thiz);
-        LOGI("nativeResume OK");
-    } else {
-        LOGI("[WARN] nativeResume nicht gefunden");
-    }
-
-    int running = 1;
-    int frame   = 0;
-    while (running) {
-        SDL_Event ev;
-        while (SDL_PollEvent(&ev)) {
-            if (ev.type == SDL_QUIT) running = 0;
-            if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE) running = 0;
-            jni_shim_handle_sdl_event(&ev);
-        }
-
-        /* UI-Task-Pump VOR jedem Render-Frame (HandlerThread-Emulation) */
-        jni_pump_ui_tasks();
-
-        if (unity_native_render && env) {
-            arm_crash_handler("nativeRender");
-            LOGI("render frame %d — rufe nativeRender(env=%p, thiz=%p) ...",
-                 frame, env, g_unity_player_thiz);
-            unsigned char ok = unity_native_render(env, g_unity_player_thiz);
-            LOGI("render frame %d — nativeRender OK (rc=%u)", frame, ok);
-        } else {
-            LOGI("render frame %d — kein nativeRender/env", frame);
-        }
-        SDL_GL_SwapWindow(sdl_win);
-        frame++;
-        if (frame > 5) {
-            LOGI("5 Frames erreicht — beende Test");
-            running = 0;
-        }
-    }
-
-    if (unity_native_pause && env) {
-        arm_crash_handler("nativePause");
-        LOGI("Rufe nativePause(env=%p, thiz=%p)", env, g_unity_player_thiz);
-        unity_native_pause(env, g_unity_player_thiz);
-    }
-    if (unity_native_focus_change) {
-        LOGI("Rufe nativeFocusChanged(env=%p, thiz=%p, false)",
-             env, g_unity_player_thiz);
-        unity_native_focus_change(env, g_unity_player_thiz, 0);
-    }
-    LOGI("Loader beendet");
-    return 0;
-}
+    LOGI("Rufe initJni(env=%
