@@ -10,22 +10,24 @@
 #include <dlfcn.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <fcntl.h>
 #include <dirent.h>
 #include <android/log.h>
+
+/* glibc deklariert stat/fstat/lstat evtl. als Makros - wir wollen eigene
+ * Symbole im dynsym-Table, damit dlsym(RTLD_DEFAULT, "stat") sie findet. */
+#undef stat
+#undef lstat
+#undef fstat
 
 #define TAG "deadeffect-android"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
-/* ================================================================
- * __android_log_* : eigene Implementierung auf stderr
- *
- * Es gibt auf Linux/glibc KEIN liblog. Die Symbole werden von
- * libunity, libil2cpp, libmain und von unseren eigenen Quellen
- * (ueber android/log.h) gebraucht und muessen hier definiert
- * werden — sonst schlaegt der Link fehl.
- * ================================================================ */
+/* ------------------------------------------------------------ */
+/* Android-Logger                                                */
+/* ------------------------------------------------------------ */
 int __android_log_print(int prio, const char *tag, const char *fmt, ...) {
     char buf[1024];
     va_list ap;
@@ -56,9 +58,9 @@ int __android_log_write(int prio, const char *tag, const char *text) {
     return text ? (int)strlen(text) : 0;
 }
 
-/* ================================================================
- * ANativeWindow Fake
- * ================================================================ */
+/* ------------------------------------------------------------ */
+/* ANativeWindow                                                 */
+/* ------------------------------------------------------------ */
 typedef struct ANativeWindow {
     int width;
     int height;
@@ -93,26 +95,42 @@ int ANativeWindow_setBuffersGeometry(ANativeWindow *w, int width, int height, in
     return 0;
 }
 
-/* ================================================================
- * ALooper Fake
- * ================================================================ */
+/* ------------------------------------------------------------ */
+/* ALooper                                                       */
+/* ------------------------------------------------------------ */
 void *ALooper_forThread(void)     { return (void *)0x1; }
 void *ALooper_prepare(int opts)   { (void)opts; return (void *)0x1; }
 void  ALooper_acquire(void *looper) { (void)looper; }
 void  ALooper_release(void *looper) { (void)looper; }
 int   ALooper_pollAll(int timeout, int *fd, int *events, void **data) {
     (void)timeout; (void)fd; (void)events; (void)data;
-    return -1; /* ALOOPER_POLL_TIMEOUT */
+    return -1;
 }
+int   ALooper_pollOnce(int timeout, int *fd, int *events, void **data) {
+    (void)timeout; (void)fd; (void)events; (void)data;
+    return -1;
+}
+int   ALooper_addFd(void *l, int fd, int ident, int events, void *cb, void *data) {
+    (void)l; (void)fd; (void)ident; (void)events; (void)cb; (void)data;
+    return 0;
+}
+int   ALooper_removeFd(void *l, int fd) { (void)l; (void)fd; return 0; }
 void  ALooper_wake(void *looper) { (void)looper; }
 
-/* ================================================================
- * ASensor Fake
- * ================================================================ */
+/* ------------------------------------------------------------ */
+/* ASensorManager                                                */
+/* ------------------------------------------------------------ */
 void *ASensorManager_getInstance(void) { return (void *)0x1; }
+void *ASensorManager_getInstanceForPackage(const char *pkg) { (void)pkg; return (void *)0x1; }
 void *ASensorManager_getDefaultSensor(void *mgr, int type) {
     (void)mgr; (void)type;
     return (void *)0x2;
+}
+/* NEU: wird von libunity unresolved gemeldet */
+int   ASensorManager_getSensorList(void *mgr, const void **list) {
+    (void)mgr;
+    if (list) *list = NULL;
+    return 0;
 }
 void *ASensorManager_createEventQueue(void *mgr, void *looper,
                                       int ident, void *cb, void *data) {
@@ -141,18 +159,107 @@ int         ASensor_getType(void *sensor)       { (void)sensor; return 1; }
 float       ASensor_getResolution(void *sensor) { (void)sensor; return 1.0f; }
 int         ASensor_getMinDelay(void *sensor)   { (void)sensor; return 10000; }
 
-/* ================================================================
- * System Properties Fake
- * ================================================================ */
+/* ------------------------------------------------------------ */
+/* System-Properties (Bionic)                                    */
+/* ------------------------------------------------------------ */
+typedef struct prop_info prop_info;
+
 int __system_property_get(const char *name, char *value) {
     (void)name;
     if (value) { value[0] = '0'; value[1] = 0; }
     return 1;
 }
+/* NEU: */
+prop_info *__system_property_find(const char *name) {
+    (void)name;
+    return NULL;
+}
+int __system_property_read(const prop_info *pi, char *name, char *value) {
+    (void)pi;
+    if (name)  name[0]  = '\0';
+    if (value) value[0] = '\0';
+    return 0;
+}
 
-/* ================================================================
- * pthread_cond_timedwait Normalisierung
- * ================================================================ */
+/* ------------------------------------------------------------ */
+/* Bionic-Fortify-Wrapper                                        */
+/* ------------------------------------------------------------ */
+void __FD_SET_chk(int fd, void *set, size_t set_size) {
+    if (!set || fd < 0 || (size_t)(fd / 8 + 1) > set_size) return;
+    unsigned char *p = (unsigned char *)set;
+    p[fd / 8] |= (unsigned char)(1u << (fd % 8));
+}
+int __FD_ISSET_chk(int fd, const void *set, size_t set_size) {
+    if (!set || fd < 0 || (size_t)(fd / 8 + 1) > set_size) return 0;
+    const unsigned char *p = (const unsigned char *)set;
+    return (p[fd / 8] >> (fd % 8)) & 1;
+}
+void __FD_CLR_chk(int fd, void *set, size_t set_size) {
+    if (!set || fd < 0 || (size_t)(fd / 8 + 1) > set_size) return;
+    unsigned char *p = (unsigned char *)set;
+    p[fd / 8] &= (unsigned char)~(1u << (fd % 8));
+}
+
+long int __fdelt_chk(long int fd) {
+    if (fd < 0 || fd >= 1024) return fd % 1024;
+    return fd / 64;
+}
+
+/* ------------------------------------------------------------ */
+/* Bionic: __errno (Funktion)                                    */
+/* ------------------------------------------------------------ */
+int *__errno(void) {
+    return __errno_location();
+}
+
+/* ------------------------------------------------------------ */
+/* BSD: strlcpy                                                  */
+/* ------------------------------------------------------------ */
+size_t strlcpy(char *dst, const char *src, size_t size) {
+    if (!dst) return 0;
+    if (!src) { if (size) dst[0] = 0; return 0; }
+    size_t srclen = strlen(src);
+    if (size > 0) {
+        size_t n = (srclen < size - 1) ? srclen : size - 1;
+        memcpy(dst, src, n);
+        dst[n] = '\0';
+    }
+    return srclen;
+}
+
+/* ------------------------------------------------------------ */
+/* Bionic: android_set_abort_message                             */
+/* ------------------------------------------------------------ */
+void android_set_abort_message(const char *msg) {
+    if (msg) LOGE("android_set_abort_message: %s", msg);
+}
+
+/* ------------------------------------------------------------ */
+/* glibc: stat/fstat/lstat direkter Export (Syscall-Fallback)    */
+/* ------------------------------------------------------------ */
+int stat(const char *path, struct stat *buf) {
+    return (int)syscall(SYS_newfstatat, AT_FDCWD, path, buf, 0);
+}
+int lstat(const char *path, struct stat *buf) {
+    return (int)syscall(SYS_newfstatat, AT_FDCWD, path, buf, AT_SYMLINK_NOFOLLOW);
+}
+int fstat(int fd, struct stat *buf) {
+    return (int)syscall(SYS_fstat, fd, buf);
+}
+
+/* ------------------------------------------------------------ */
+/* pthread_atfork (sicherer Export, falls --as-needed griff)     */
+/* ------------------------------------------------------------ */
+int pthread_atfork(void (*prepare)(void),
+                   void (*parent)(void),
+                   void (*child)(void)) {
+    (void)prepare; (void)parent; (void)child;
+    return 0;
+}
+
+/* ------------------------------------------------------------ */
+/* pthread_cond_timedwait: CLOCK_MONOTONIC -> CLOCK_REALTIME     */
+/* ------------------------------------------------------------ */
 typedef int (*real_cond_timedwait_t)(pthread_cond_t *, pthread_mutex_t *,
                                      const struct timespec *);
 static real_cond_timedwait_t g_real_cond_timedwait = NULL;
@@ -203,13 +310,4 @@ int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
     }
 
     return g_real_cond_timedwait(cond, mutex, &real_abs);
-}
-
-/* ================================================================
- * Fortify-Wrapper — Signatur MUSS der glibc-Deklaration entsprechen:
- *   extern long int __fdelt_chk (long int __d);
- * ================================================================ */
-long int __fdelt_chk(long int fd) {
-    if (fd < 0 || fd >= 1024) return fd % 1024;
-    return fd / 64;
 }
