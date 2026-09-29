@@ -2,15 +2,6 @@ name: Analyze NextOS vs Dead Effect
 
 on:
   workflow_dispatch:
-    inputs:
-      src2_path:
-        description: 'Verzeichnis mit den NextOS-Dateien'
-        required: true
-        default: 'src2'
-      release_pattern:
-        description: 'Glob-Pattern für Release-Assets (z.B. "*libs*.zip" oder "libunity.so")'
-        required: false
-        default: '*'
 
 jobs:
   analyze:
@@ -64,117 +55,82 @@ jobs:
           fi
 
       - name: "Download Dead Effect Libs aus Release"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p analysis/deadeffect
-          echo "Repository: ${{ github.repository }}"
-          echo "Suche Release-Assets mit Pattern: ${{ github.event.inputs.release_pattern }}"
-
-          # Versuche Release-Assets herunterzuladen
-          if gh release download --repo ${{ github.repository }} --pattern "${{ github.event.inputs.release_pattern }}" --dir /tmp/de_release --clobber 2>&1; then
-            echo "Release-Download erfolgreich"
-            ls -la /tmp/de_release/
+          echo "Lade arm64-v8a.zip herunter..."
+          wget -q "https://github.com/kattimasen-ops/DE-Port-Test/releases/download/V1/arm64-v8a.zip" -O /tmp/arm64-v8a.zip
+          if [ -f /tmp/arm64-v8a.zip ]; then
+            echo "Download erfolgreich: $(stat -c%s /tmp/arm64-v8a.zip) Bytes"
+            unzip -o /tmp/arm64-v8a.zip -d /tmp/de_libs/
+            echo "=== Entpackte Struktur ==="
+            find /tmp/de_libs/ -type f | head -20
+            # Kopiere die benötigten Dateien (rekursiv suchen)
+            find /tmp/de_libs/ -name "libunity.so" -exec cp {} analysis/deadeffect/ \; 2>/dev/null || true
+            find /tmp/de_libs/ -name "libil2cpp.so" -exec cp {} analysis/deadeffect/ \; 2>/dev/null || true
+            find /tmp/de_libs/ -name "global-metadata.dat" -exec cp {} analysis/deadeffect/ \; 2>/dev/null || true
+            find /tmp/de_libs/ -name "libmain.so" -exec cp {} analysis/deadeffect/ \; 2>/dev/null || true
+            find /tmp/de_libs/ -name "libc++_shared.so" -exec cp {} analysis/deadeffect/ \; 2>/dev/null || true
           else
-            echo "Fallback: Direkter Download vom latest Release"
-            gh release download --repo ${{ github.repository }} --dir /tmp/de_release --clobber 2>&1 || echo "Kein Release gefunden"
-            ls -la /tmp/de_release/ 2>/dev/null || true
+            echo "Download fehlgeschlagen!" > analysis/deadeffect/error.txt
           fi
-
-          # Entpacke Archive falls vorhanden
-          for f in /tmp/de_release/*.zip /tmp/de_release/*.tar.gz /tmp/de_release/*.7z; do
-            [ -f "$f" ] || continue
-            echo "Entpacke $f"
-            case "$f" in
-              *.zip) unzip -o "$f" -d /tmp/de_release_extracted/ ;;
-              *.tar.gz) mkdir -p /tmp/de_release_extracted && tar xzf "$f" -C /tmp/de_release_extracted/ ;;
-            esac
-          done
-
-          # Kopiere gefundene .so-Dateien
-          find /tmp/de_release /tmp/de_release_extracted -name "libunity.so" -exec cp {} analysis/deadeffect/ \; 2>/dev/null || true
-          find /tmp/de_release /tmp/de_release_extracted -name "libil2cpp.so" -exec cp {} analysis/deadeffect/ \; 2>/dev/null || true
-          find /tmp/de_release /tmp/de_release_extracted -name "global-metadata.dat" -exec cp {} analysis/deadeffect/ \; 2>/dev/null || true
-          find /tmp/de_release /tmp/de_release_extracted -name "libmain.so" -exec cp {} analysis/deadeffect/ \; 2>/dev/null || true
-          find /tmp/de_release /tmp/de_release_extracted -name "libc++_shared.so" -exec cp {} analysis/deadeffect/ \; 2>/dev/null || true
-
-          echo "=== Gefundene Dead Effect Libs ==="
+          echo "=== Dead Effect Libs ==="
           ls -la analysis/deadeffect/
 
       - name: "Analyse: NextOS Loader"
         run: |
           mkdir -p analysis/nextos_loader
-          SRC2="${{ github.event.inputs.src2_path }}"
+          LOADER="src2/deadtrigger-nextos"
 
-          # Suche den Loader (rekursiv, da er in Unterordnern sein kann)
-          LOADER=$(find "$SRC2" -name "deadtrigger-nextos" -type f 2>/dev/null | head -1)
-          if [ -z "$LOADER" ]; then
-            LOADER=$(find "$SRC2" -type f -executable -size +100k 2>/dev/null | head -1)
-          fi
-          echo "Loader: $LOADER"
-
-          if [ -n "$LOADER" ] && [ -f "$LOADER" ]; then
+          if [ -f "$LOADER" ]; then
             file "$LOADER" > analysis/nextos_loader/file.txt
             readelf -h "$LOADER" > analysis/nextos_loader/elf_header.txt 2>&1
             readelf -d "$LOADER" > analysis/nextos_loader/dynamic.txt 2>&1
             readelf -s "$LOADER" > analysis/nextos_loader/symbols.txt 2>&1
             nm -D "$LOADER" > analysis/nextos_loader/nm_dynamic.txt 2>&1
 
-            # JNI/FalsoJNI-Strings
             strings "$LOADER" | grep -iE "jni|java|unity|class|method|field|object|surface|render|focus|resume|native|falsojni|fake|stub|dalvik|art|libjvm|bitter" > analysis/nextos_loader/strings_jni.txt 2>&1 || true
             strings "$LOADER" | grep -iE "error|fail|warn|abort|crash" > analysis/nextos_loader/strings_errors.txt 2>&1 || true
             strings "$LOADER" | head -5000 > analysis/nextos_loader/strings_all.txt 2>&1
 
-            # Suche nach "FalsoJNI" oder ähnlichen Schlüsselwörtern
             strings "$LOADER" | grep -iE "falsojni|FalsoJNI|FALSO" > analysis/nextos_loader/falsojni_hits.txt 2>&1 || true
             strings "$LOADER" | grep -iE "libart|libjvm|dalvik|JNI_CreateJavaVM" > analysis/nextos_loader/jvm_hits.txt 2>&1 || true
 
-            # Disassembly
             aarch64-linux-gnu-objdump -d "$LOADER" > analysis/nextos_loader/disasm.txt 2>&1 || true
             grep -n "falsojni\|FalsoJNI\|jni_\|JNI_\|Java_\|RegisterNatives\|FindClass\|GetMethodID" analysis/nextos_loader/disasm.txt > analysis/nextos_loader/disasm_jni_hits.txt 2>&1 || true
           else
-            echo "Loader nicht gefunden in $SRC2" > analysis/nextos_loader/error.txt
+            echo "Loader nicht gefunden: $LOADER" > analysis/nextos_loader/error.txt
           fi
 
       - name: "Analyse: NextOS Metadaten (JSON)"
         run: |
           mkdir -p analysis/nextos_meta
-          SRC2="${{ github.event.inputs.src2_path }}"
-
-          # Sammle alle JSONs
-          find "$SRC2" -name "*.json" -type f 2>/dev/null | while read J; do
-            BASENAME=$(basename "$J")
-            cp "$J" "analysis/nextos_meta/$BASENAME" 2>/dev/null || true
-            echo "=== $BASENAME ===" >> analysis/nextos_meta/summary.txt
-            head -100 "$J" >> analysis/nextos_meta/summary.txt 2>&1 || true
-            echo "" >> analysis/nextos_meta/summary.txt
-          done
-
-          # Sammle READMEs und Markdown
-          find "$SRC2" -name "*.md" -o -name "*.txt" 2>/dev/null | while read M; do
-            BASENAME=$(basename "$M")
-            cp "$M" "analysis/nextos_meta/$BASENAME" 2>/dev/null || true
+          for f in src2/extractor.json src2/port.json src2/nxport.json \
+                   src2/NXRELEASE-METADATA.json src2/MANIFEST.sha256 \
+                   src2/SBOM.cdx.json src2/adapter-contract-v1.json \
+                   src2/migration-status-v1.json; do
+            if [ -f "$f" ]; then
+              BASENAME=$(basename "$f")
+              cp "$f" "analysis/nextos_meta/$BASENAME"
+              echo "=== $BASENAME ===" >> analysis/nextos_meta/summary.txt
+              head -100 "$f" >> analysis/nextos_meta/summary.txt 2>&1 || true
+              echo "" >> analysis/nextos_meta/summary.txt
+            fi
           done
 
       - name: "Analyse: NextOS NXExtract"
         run: |
           mkdir -p analysis/nxextract
-          SRC2="${{ github.event.inputs.src2_path }}"
-
-          find "$SRC2" -name "nxextract.py" -type f 2>/dev/null | head -1 | while read PY; do
-            cp "$PY" analysis/nxextract/nxextract.py
-            grep -iE "jni|java|unity|libunity|libil2cpp|loader|payload|validate|falsojni" "$PY" > analysis/nxextract/relevant_lines.txt 2>&1 || true
-            head -300 "$PY" > analysis/nxextract/head.txt
-          done
-
-          find "$SRC2" -name "nxextract-ui" -type f 2>/dev/null | head -1 | while read UI; do
-            file "$UI" > analysis/nxextract/ui_file.txt
-            strings "$UI" | head -1000 > analysis/nxextract/ui_strings.txt 2>&1
-          done
-
-          find "$SRC2" -name "*.sh" -type f 2>/dev/null | while read SH; do
-            BASENAME=$(basename "$SH")
-            cp "$SH" "analysis/nxextract/$BASENAME"
+          if [ -f "src2/nxextract.py" ]; then
+            cp "src2/nxextract.py" analysis/nxextract/nxextract.py
+            grep -iE "jni|java|unity|libunity|libil2cpp|loader|payload|validate|falsojni" "src2/nxextract.py" > analysis/nxextract/relevant_lines.txt 2>&1 || true
+            head -300 "src2/nxextract.py" > analysis/nxextract/head.txt
+          fi
+          if [ -f "src2/nxextract-ui" ]; then
+            file "src2/nxextract-ui" > analysis/nxextract/ui_file.txt
+            strings "src2/nxextract-ui" | head -1000 > analysis/nxextract/ui_strings.txt 2>&1
+          fi
+          for sh in src2/nxextract-runtime-env.sh src2/run-extractor.sh; do
+            [ -f "$sh" ] && cp "$sh" analysis/nxextract/
           done
 
       - name: "Analyse: Dead Effect libunity.so"
@@ -190,7 +146,6 @@ jobs:
             strings "$LIBUNITY" | grep -iE "com/unity3d|com/google|android/|bitter" > analysis/deadeffect_analysis/strings_classes.txt 2>&1
             strings "$LIBUNITY" | grep -iE "falsojni|FalsoJNI|fake|stub|libart|libjvm" > analysis/deadeffect_analysis/strings_jni_impl.txt 2>&1 || true
 
-            # Disassembly der nativen Methoden
             for SYM in nativeSendSurfaceChangedEvent nativeFocusChanged nativeResume nativeRender nativeRecreateGfxState nativePause JNI_OnLoad; do
               OFFSET=$(readelf -s "$LIBUNITY" 2>/dev/null | grep -i "$SYM" | head -1 | awk '{print $2}')
               if [ -n "$OFFSET" ]; then
@@ -222,7 +177,6 @@ jobs:
           if [ -n "$TOOL" ] && [ -f "$IL2CPP" ] && [ -f "$META" ]; then
             chmod +x "$TOOL"
             "$TOOL" --bin "$IL2CPP" --metadata "$META" --cs-out analysis/il2cpp/types.cs --json-out analysis/il2cpp/metadata.json 2>&1 | tee analysis/il2cpp/output.txt || true
-            # Suche nach nativeSendSurfaceChangedEvent in den Ergebnissen
             grep -i "nativeSendSurface\|nativeFocus\|nativeResume\|nativeRender" analysis/il2cpp/*.json analysis/il2cpp/*.cs 2>/dev/null | head -50 > analysis/il2cpp/native_methods.txt || true
           else
             echo "Il2CppInspector oder Eingabedateien fehlen" > analysis/il2cpp/error.txt
