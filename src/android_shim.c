@@ -178,8 +178,12 @@ int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
 
 /* ================================================================
  * Fortify-Wrapper (verhindern Endlosrekursion)
+ *
+ * WICHTIG: Signatur MUSS exakt der glibc-Deklaration entsprechen:
+ *   extern long int __fdelt_chk (long int __d);
+ * Sonst: "conflicting types for '__fdelt_chk'"
  * ================================================================ */
-int __fdelt_chk(int fd) {
+long int __fdelt_chk(long int fd) {
     if (fd < 0 || fd >= 1024) return fd % 1024;
     return fd / 64;
 }
