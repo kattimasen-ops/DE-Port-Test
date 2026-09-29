@@ -187,15 +187,13 @@ log "Quellen:"
 ls -la "$BUILD_SRC" 2>&1 | tee -a "$BUILD_LOG"
 cd "$BUILD_SRC"
 
-# Wichtig:
-# - --export-dynamic (-rdynamic) stellt sicher, dass dlopen/dlsym/stat
-#   im dynsym des Loaders stehen und von libunity aufgelöst werden.
-# - -Wl,-E ist der gleiche Effekt, redundant aber explizit.
-# - -fno-stack-protector für den Crash-Handler: hier absichtlich NICHT
-#   global, weil die Handler-Funktionen einzeln mit no_stack_protector
-#   markiert sind. Global würde der Stack-Canary als Sicherheitsnetz
-#   für den Rest fehlen.
-CFLAGS="-D_GNU_SOURCE -O2 -fPIC -fno-omit-frame-pointer"
+# CFLAGS:
+# - -fno-stack-protector global: GCC 9 aarch64 ignoriert das
+#   no_stack_protector-Attribut, deshalb global ausschalten,
+#   damit der Crash-Handler zuverlässig läuft.
+# - -rdynamic / -Wl,--export-dynamic unten: macht dlopen/dlsym/stat
+#   im dynsym des Loaders sichtbar, damit libunity sie findet.
+CFLAGS="-D_GNU_SOURCE -O2 -fPIC -fno-omit-frame-pointer -fno-stack-protector"
 CFLAGS="$CFLAGS -DDEAD_EFFECT_LIBDIR=\"/roms/ports/DeadEffect/lib\""
 CFLAGS="$CFLAGS -DDEAD_EFFECT_ASSETS=\"/roms/ports/DeadEffect/assets\""
 CFLAGS="$CFLAGS -Wno-int-conversion -Wno-incompatible-pointer-types"
@@ -240,9 +238,9 @@ if [ -f deadeffect-loader ]; then
     HAS_SL=0
     HAS_DLOPEN=0
     HAS_SO_ISH=0
-    nm -D deadeffect-loader 2>/dev/null | grep -q ' T main'           && HAS_MAIN=1
-    nm -D deadeffect-loader 2>/dev/null | grep -q ' T slCreateEngine' && HAS_SL=1
-    nm -D deadeffect-loader 2>/dev/null | grep -q ' T dlopen'         && HAS_DLOPEN=1
+    nm -D deadeffect-loader 2>/dev/null | grep -q ' T main'             && HAS_MAIN=1
+    nm -D deadeffect-loader 2>/dev/null | grep -q ' T slCreateEngine'   && HAS_SL=1
+    nm -D deadeffect-loader 2>/dev/null | grep -q ' T dlopen'           && HAS_DLOPEN=1
     nm -D deadeffect-loader 2>/dev/null | grep -q ' T so_is_our_handle' && HAS_SO_ISH=1
 
     if [ "$HAS_MAIN" = "1" ] && [ "$HAS_SL" = "1" ] && \
