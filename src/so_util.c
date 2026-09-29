@@ -42,6 +42,7 @@ typedef struct {
     Elf64_Rela *jmprel; size_t jmprelcount;
     void (**init_array)(void); size_t init_count;
     void (*init_fn)(void);
+    char path[256];          /* NEU: Quellpfad für Inspektion */
 } so_module;
 
 #define MAX_MODULES 8
@@ -269,6 +270,9 @@ void *so_load(const char *path) {
     so_module *m = &g_modules[g_nmods++];
     memset(m, 0, sizeof(*m));
     m->base = base; m->size = span; m->min_vaddr = min_vaddr; m->dyn = dyn;
+    /* NEU: Quellpfad für Modul-Inspektion merken */
+    strncpy(m->path, path, sizeof(m->path) - 1);
+    m->path[sizeof(m->path) - 1] = '\0';
 
     size_t rela_sz = 0, rela_ent = 0, jmprel_sz = 0;
     uint64_t *relr = NULL; size_t relr_sz = 0;
@@ -377,6 +381,16 @@ int so_is_our_handle(void *handle) {
         if ((void *)&g_modules[i] == handle) return 1;
     }
     return 0;
+}
+
+/* NEU: Modul-Inspektion für load_module_chain() */
+int so_module_count(void) {
+    return g_nmods;
+}
+
+const char *so_module_path(int index) {
+    if (index < 0 || index >= g_nmods) return NULL;
+    return g_modules[index].path;
 }
 
 void so_flush_caches(void) { }
