@@ -9,4 +9,9 @@ void   so_flush_caches(void);
 void   so_set_imports(void);
 void   so_dump_symbols(void *handle);
 
-#endif /* SO_UTIL_H */
+int    so_is_our_handle(void *handle);
+
+int    so_module_count(void);
+const char *so_module_path(int index);
+
+#endif
