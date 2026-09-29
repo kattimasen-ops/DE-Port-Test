@@ -425,7 +425,7 @@ jobs:
           head -200 "$OUT/native_indirect_calls.txt" || true
 
       # ============================================================
-      # PHASE 8: LIEF-Kontrolle
+      # PHASE 8: LIEF-Kontrolle (defensiv gegen API-Änderungen)
       # ============================================================
       - name: "Phase 8: LIEF Reloc-Kontrolle"
         continue-on-error: true
@@ -434,23 +434,37 @@ jobs:
           python3 << 'PYEOF'
           import lief, os
 
+          def safe(obj, *names, default=None):
+              for n in names:
+                  try:
+                      v = getattr(obj, n)
+                      return v() if callable(v) else v
+                  except Exception:
+                      continue
+              return default
+
           libs = ['libunity', 'libil2cpp', 'libmain']
           for lib in libs:
               p = f'analysis/deadeffect/{lib}.so'
               if not os.path.exists(p):
                   continue
-              b = lief.parse(p)
+              try:
+                  b = lief.parse(p)
+              except Exception as e:
+                  print(f'{lib}: LIEF parse fehlgeschlagen: {e}')
+                  continue
               if not b:
                   continue
+
               with open(f'analysis/lief/{lib}.txt','w') as f:
                   f.write(f'=== {lib}.so ===\n')
-                  f.write(f'Format: {b.format}\n')
-                  f.write(f'Arch: {b.header.machine_type}\n')
-                  f.write(f'Entrypoint: 0x{b.entrypoint:x}\n')
-                  f.write(f'Is PIC: {b.is_pic}\n')
-                  f.write(f'Sections: {len(b.sections)}\n')
-                  f.write(f'Segments: {len(b.segments)}\n')
-                  f.write(f'Dynamic Symbols: {len(b.dynamic_symbols)}\n')
+                  f.write(f'Format:             {safe(b, "format")}\n')
+                  f.write(f'Arch:               {safe(b.header, "machine_type")}\n')
+                  f.write(f'Entrypoint:         0x{safe(b, "entrypoint", default=0):x}\n')
+                  f.write(f'Is PIE:             {safe(b, "is_pie", "is_pic")}\n')
+                  f.write(f'Sections:           {len(b.sections)}\n')
+                  f.write(f'Segments:           {len(b.segments)}\n')
+                  f.write(f'Dynamic Symbols:    {len(b.dynamic_symbols)}\n')
                   f.write(f'Imported Functions: {len(b.imported_functions)}\n')
                   f.write(f'Exported Functions: {len(b.exported_functions)}\n')
 
@@ -465,13 +479,18 @@ jobs:
               if lib == 'libunity':
                   with open(f'analysis/lief/{lib}_relocs_check.txt','w') as f:
                       try:
-                          plts = b.pltgot_relocations
+                          plts = list(b.pltgot_relocations)
                       except Exception:
                           plts = []
                       f.write(f'PLT Relocs: {len(plts)}\n')
                       for r in plts:
-                          s = r.symbol.name if r.has_symbol else '?'
-                          if any(k in s for k in ('sigaction','signal','sigaltstack','raise','kill','pthread_create','__cxa_atexit')):
+                          try:
+                              s = r.symbol.name if r.has_symbol else '?'
+                          except Exception:
+                              s = '?'
+                          if any(k in s for k in ('sigaction','signal','sigaltstack',
+                                                  'raise','kill','pthread_create',
+                                                  '__cxa_atexit')):
                               f.write(f'  0x{r.address:x}  {s}\n')
           PYEOF
 
