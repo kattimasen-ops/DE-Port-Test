@@ -32,7 +32,6 @@ jobs:
             pkg-config \
             meson \
             ninja-build
-
           pip3 install --quiet lief
 
       - name: Install radare2 (aus Git)
@@ -51,142 +50,199 @@ jobs:
           echo "=== Tool-Versionen ==="
           aarch64-linux-gnu-objdump --version | head -1
           aarch64-linux-gnu-readelf --version | head -1
-          rabin2 -v 2>&1 | head -1 || echo "rabin2: NICHT verfügbar (nicht kritisch)"
+          rabin2 -v 2>&1 | head -1 || echo "rabin2: NICHT verfuegbar (nicht kritisch)"
           scanelf --version 2>&1 | head -1 || true
           python3 -c "import lief; print('LIEF', lief.__version__)" || true
 
-      - name: Download Dead Effect Libs
+      # ============================================================
+      # Ordnerstruktur — libunity isoliert, mit Unterordnern
+      # ============================================================
+      - name: "Ordnerstruktur anlegen"
         run: |
           mkdir -p analysis/deadeffect
+
+          # libunity: alles hier hinein
+          mkdir -p analysis/libunity/logs
+          mkdir -p analysis/libunity/lief
+          mkdir -p analysis/libunity/radare2
+          mkdir -p analysis/libunity/paxutils
+
+          # andere Bibliotheken: getrennt halten
+          mkdir -p analysis/libil2cpp/lief
+          mkdir -p analysis/libil2cpp/radare2
+          mkdir -p analysis/libil2cpp/paxutils
+
+          mkdir -p analysis/libmain/lief
+          mkdir -p analysis/libmain/radare2
+          mkdir -p analysis/libmain/paxutils
+
+          find analysis -type d | sort
+
+      - name: Download Dead Effect Libs
+        run: |
           echo "Lade arm64-v8a.zip herunter..."
           wget -q -L -T 300 \
             "https://github.com/kattimasen-ops/DE-Port-Test/releases/download/V1/arm64-v8a.zip" \
             -O /tmp/arm64-v8a.zip
 
-          if [ -f /tmp/arm64-v8a.zip ]; then
-            echo "Download erfolgreich: $(stat -c%s /tmp/arm64-v8a.zip) Bytes"
-            unzip -o /tmp/arm64-v8a.zip -d /tmp/de_libs/
-            find /tmp/de_libs/ -type f
-
-            find /tmp/de_libs/ -name "libunity.so"      -exec cp {} analysis/deadeffect/ \;
-            find /tmp/de_libs/ -name "libil2cpp.so"     -exec cp {} analysis/deadeffect/ \;
-            find /tmp/de_libs/ -name "libmain.so"       -exec cp {} analysis/deadeffect/ \;
-            find /tmp/de_libs/ -name "libc++_shared.so" -exec cp {} analysis/deadeffect/ \;
-          else
-            echo "Download fehlgeschlagen!" > analysis/deadeffect/error.txt
+          if [ ! -f /tmp/arm64-v8a.zip ]; then
+            echo "Download fehlgeschlagen!" | tee analysis/deadeffect/error.txt
             exit 1
           fi
 
+          echo "Download: $(stat -c%s /tmp/arm64-v8a.zip) Bytes"
+          unzip -o /tmp/arm64-v8a.zip -d /tmp/de_libs/
+          find /tmp/de_libs/ -type f
+
+          for L in libunity.so libil2cpp.so libmain.so libc++_shared.so; do
+            F=$(find /tmp/de_libs/ -name "$L" | head -1)
+            if [ -n "$F" ]; then
+              cp "$F" analysis/deadeffect/
+            fi
+          done
+
+          ls -l analysis/deadeffect/
+
       # ============================================================
-      # PHASE 1: Basis-Analyse
+      # PHASE 1 — Basis-Analysen
       # ============================================================
       - name: "Phase 1: libmain.so – Basis-Analyse"
         run: |
-          mkdir -p analysis/libmain
           LIB="analysis/deadeffect/libmain.so"
+          OUT="analysis/libmain"
           if [ -f "$LIB" ]; then
-            file "$LIB" > analysis/libmain/file.txt
-            readelf -h "$LIB" > analysis/libmain/elf_header.txt 2>&1
-            readelf -d "$LIB" > analysis/libmain/dynamic.txt 2>&1
-            readelf -sW "$LIB" > analysis/libmain/symbols_all.txt 2>&1
-            readelf -rW "$LIB" > analysis/libmain/relocations.txt 2>&1
-            nm -D "$LIB" > analysis/libmain/nm_dynamic.txt 2>&1
-            nm "$LIB"   > analysis/libmain/nm_all.txt 2>&1
-            strings -a "$LIB" > analysis/libmain/strings_all.txt 2>&1
-
-            aarch64-linux-gnu-objdump -d "$LIB" > analysis/libmain/disasm_full.txt 2>&1
+            file "$LIB"                      > "$OUT/file.txt"
+            readelf -h "$LIB"                > "$OUT/elf_header.txt" 2>&1
+            readelf -d "$LIB"                > "$OUT/dynamic.txt" 2>&1
+            readelf -sW "$LIB"               > "$OUT/symbols_all.txt" 2>&1
+            readelf -rW "$LIB"               > "$OUT/relocations.txt" 2>&1
+            nm -D "$LIB"                     > "$OUT/nm_dynamic.txt" 2>&1
+            nm "$LIB"                        > "$OUT/nm_all.txt" 2>&1
+            strings -a "$LIB"                > "$OUT/strings_all.txt" 2>&1
+            aarch64-linux-gnu-objdump -d "$LIB" > "$OUT/disasm_full.txt" 2>&1
             grep -n "JNI_OnLoad\|RegisterNatives\|FindClass\|GetMethodID" \
-              analysis/libmain/disasm_full.txt > analysis/libmain/disasm_jni_hits.txt 2>&1 || true
+              "$OUT/disasm_full.txt" > "$OUT/disasm_jni_hits.txt" 2>&1 || true
           fi
 
       - name: "Phase 1: libunity.so – Basis-Analyse"
         run: |
-          mkdir -p analysis/libunity
           LIB="analysis/deadeffect/libunity.so"
+          OUT="analysis/libunity"
           if [ -f "$LIB" ]; then
-            file "$LIB" > analysis/libunity/file.txt
-            readelf -h "$LIB" > analysis/libunity/elf_header.txt 2>&1
-            readelf -d "$LIB" > analysis/libunity/dynamic.txt 2>&1
-            readelf -l "$LIB" > analysis/libunity/program_headers.txt 2>&1
-            readelf -SW "$LIB" > analysis/libunity/section_headers.txt 2>&1
-            readelf -sW "$LIB" > analysis/libunity/symbols_all.txt 2>&1
-            readelf -rW "$LIB" > analysis/libunity/relocations_full.txt 2>&1
-            nm -D "$LIB" > analysis/libunity/nm_dynamic.txt 2>&1
-            nm "$LIB"   > analysis/libunity/nm_all.txt 2>&1
+            file "$LIB"                      > "$OUT/file.txt"
+            readelf -h "$LIB"                > "$OUT/elf_header.txt" 2>&1
+            readelf -d "$LIB"                > "$OUT/dynamic.txt" 2>&1
+            readelf -l "$LIB"                > "$OUT/program_headers.txt" 2>&1
+            readelf -SW "$LIB"               > "$OUT/section_headers.txt" 2>&1
+            readelf -sW "$LIB"               > "$OUT/symbols_all.txt" 2>&1
+            readelf -rW "$LIB"               > "$OUT/relocations_full.txt" 2>&1
+            nm -D "$LIB"                     > "$OUT/nm_dynamic.txt" 2>&1
+            nm "$LIB"                        > "$OUT/nm_all.txt" 2>&1
 
-            aarch64-linux-gnu-readelf -sW "$LIB" | grep -E "FUNC.*GLOBAL.*DEFAULT" | sort \
-              > analysis/libunity/symbols_exported.txt 2>&1 || true
-            aarch64-linux-gnu-readelf -sW "$LIB" | grep -E "UND" | sort \
-              > analysis/libunity/symbols_imported.txt 2>&1 || true
+            aarch64-linux-gnu-readelf -sW "$LIB" \
+              | grep -E "FUNC.*GLOBAL.*DEFAULT" | sort \
+              > "$OUT/symbols_exported.txt" 2>&1 || true
+            aarch64-linux-gnu-readelf -sW "$LIB" \
+              | grep -E "UND" | sort \
+              > "$OUT/symbols_imported.txt" 2>&1 || true
 
-            echo "=== Symbol-Statistik ===" > analysis/libunity/symbol_stats.txt
-            echo "Alle Symbole: $(wc -l < analysis/libunity/symbols_all.txt)" >> analysis/libunity/symbol_stats.txt
-            echo "Exportiert:    $(wc -l < analysis/libunity/symbols_exported.txt)" >> analysis/libunity/symbol_stats.txt
-            echo "Importiert:    $(wc -l < analysis/libunity/symbols_imported.txt)" >> analysis/libunity/symbol_stats.txt
+            {
+              echo "=== Symbol-Statistik libunity ==="
+              echo "Alle:        $(wc -l < "$OUT/symbols_all.txt")"
+              echo "Exportiert:  $(wc -l < "$OUT/symbols_exported.txt")"
+              echo "Importiert:  $(wc -l < "$OUT/symbols_imported.txt")"
+            } > "$OUT/logs/symbol_stats.txt"
 
-            strings -a "$LIB" > analysis/libunity/strings_all.txt 2>&1
-            strings -a "$LIB" | grep -E "^native[A-Z]|^nOn|^init[A-Z]|^deinit[A-Z]|^setVr|^isQuiting|^onAudio|^initializeARCore|^pauseARCore|^resumeARCore" \
-              | sort -u > analysis/libunity/strings_native_methods.txt || true
-            strings -a "$LIB" | grep -E "^com/unity3d/player/" | sort -u > analysis/libunity/strings_unity_classes.txt || true
-            strings -a "$LIB" | grep -E "^com/google/androidgamesdk/|^bitter/jnibridge/|^android/" \
-              | sort -u > analysis/libunity/strings_jni_classes.txt || true
-            strings -a "$LIB" | grep -E "^\(.*\)[VZBCSIJFD]|^\(.*\)L" | sort -u > analysis/libunity/strings_signatures.txt || true
+            strings -a "$LIB" > "$OUT/strings_all.txt" 2>&1
+            strings -a "$LIB" \
+              | grep -E "^native[A-Z]|^nOn|^init[A-Z]|^deinit[A-Z]|^setVr|^isQuiting|^onAudio|^initializeARCore|^pauseARCore|^resumeARCore" \
+              | sort -u > "$OUT/strings_native_methods.txt" || true
+            strings -a "$LIB" \
+              | grep -E "^com/unity3d/player/" | sort -u \
+              > "$OUT/strings_unity_classes.txt" || true
+            strings -a "$LIB" \
+              | grep -E "^com/google/androidgamesdk/|^bitter/jnibridge/|^android/" | sort -u \
+              > "$OUT/strings_jni_classes.txt" || true
+            strings -a "$LIB" \
+              | grep -E "^\(.*\)[VZBCSIJFD]|^\(.*\)L" | sort -u \
+              > "$OUT/strings_signatures.txt" || true
           fi
 
       - name: "Phase 1: libil2cpp.so – Basis-Analyse"
         run: |
-          mkdir -p analysis/libil2cpp
           LIB="analysis/deadeffect/libil2cpp.so"
+          OUT="analysis/libil2cpp"
           if [ -f "$LIB" ]; then
-            file "$LIB" > analysis/libil2cpp/file.txt
-            readelf -h "$LIB" > analysis/libil2cpp/elf_header.txt 2>&1
-            readelf -d "$LIB" > analysis/libil2cpp/dynamic.txt 2>&1
-            readelf -l "$LIB" > analysis/libil2cpp/program_headers.txt 2>&1
-            readelf -SW "$LIB" > analysis/libil2cpp/section_headers.txt 2>&1
-            readelf -sW "$LIB" > analysis/libil2cpp/symbols_all.txt 2>&1
-            readelf -rW "$LIB" > analysis/libil2cpp/relocations.txt 2>&1
-            nm -D "$LIB" > analysis/libil2cpp/nm_dynamic.txt 2>&1
-            nm "$LIB"   > analysis/libil2cpp/nm_all.txt 2>&1
-            strings -a "$LIB" > analysis/libil2cpp/strings_all.txt 2>&1
+            file "$LIB"                      > "$OUT/file.txt"
+            readelf -h "$LIB"                > "$OUT/elf_header.txt" 2>&1
+            readelf -d "$LIB"                > "$OUT/dynamic.txt" 2>&1
+            readelf -l "$LIB"                > "$OUT/program_headers.txt" 2>&1
+            readelf -SW "$LIB"               > "$OUT/section_headers.txt" 2>&1
+            readelf -sW "$LIB"               > "$OUT/symbols_all.txt" 2>&1
+            readelf -rW "$LIB"               > "$OUT/relocations.txt" 2>&1
+            nm -D "$LIB"                     > "$OUT/nm_dynamic.txt" 2>&1
+            nm "$LIB"                        > "$OUT/nm_all.txt" 2>&1
+            strings -a "$LIB"                > "$OUT/strings_all.txt" 2>&1
 
-            echo "=== Symbol-Statistik ===" > analysis/libil2cpp/symbol_stats.txt
-            echo "Alle Symbole: $(wc -l < analysis/libil2cpp/symbols_all.txt)" >> analysis/libil2cpp/symbol_stats.txt
+            {
+              echo "=== Symbol-Statistik libil2cpp ==="
+              echo "Alle: $(wc -l < "$OUT/symbols_all.txt")"
+            } > "$OUT/logs_symbol_stats.txt" 2>/dev/null || \
+              echo "Symbol-Statistik libil2cpp" > "$OUT/symbol_stats.txt"
 
-            strings -a "$LIB" | grep -iE "il2cpp|unity|mono|metadata" | sort -u > analysis/libil2cpp/strings_il2cpp.txt || true
-            strings -a "$LIB" | grep -E "^[a-zA-Z_][a-zA-Z0-9_]*__[a-zA-Z0-9_]+$" | sort -u > analysis/libil2cpp/strings_methods.txt || true
-            strings -a "$LIB" | grep -E "^native[A-Z]|^nOn|^init[A-Z]|^deinit[A-Z]" | sort -u > analysis/libil2cpp/strings_native_methods.txt || true
+            strings -a "$LIB" | grep -iE "il2cpp|unity|mono|metadata" | sort -u \
+              > "$OUT/strings_il2cpp.txt" || true
+            strings -a "$LIB" \
+              | grep -E "^[a-zA-Z_][a-zA-Z0-9_]*__[a-zA-Z0-9_]+$" | sort -u \
+              > "$OUT/strings_methods.txt" || true
+            strings -a "$LIB" \
+              | grep -E "^native[A-Z]|^nOn|^init[A-Z]|^deinit[A-Z]" | sort -u \
+              > "$OUT/strings_native_methods.txt" || true
           fi
 
       # ============================================================
-      # PHASE 2: PLT / GOT / Signal-Relocations (libunity)
+      # PHASE 2 — PLT/GOT/Signal-Relocs (libunity)
       # ============================================================
-      - name: "Phase 2: PLT/GOT & Signal-Handler (libunity)"
+      - name: "Phase 2: PLT/GOT & Signal-Slots (libunity)"
         continue-on-error: true
         run: |
           LIB="analysis/deadeffect/libunity.so"
           OUT="analysis/libunity"
-          mkdir -p "$OUT"
           [ -f "$LIB" ] || exit 0
 
           aarch64-linux-gnu-objdump -d -j .plt "$LIB" > "$OUT/plt_full.txt" 2>&1 || true
 
+          # .rela.plt isolieren
           awk '/Relocation section .\.rela\.plt/,/^$/' "$OUT/relocations_full.txt" \
             > "$OUT/rela_plt.txt" || true
 
           grep -iE 'sigaction|sigaltstack|sigemptyset|sigaddset|sigprocmask|signal@|raise@|kill@|pthread_create|__cxa_atexit' \
             "$OUT/rela_plt.txt" > "$OUT/rela_plt_signal.txt" || true
 
-          awk '/R_AARCH64_JUMP_SLOT/ {print $1, $NF}' "$OUT/rela_plt.txt" \
-            | grep -iE 'sigaction|sigaltstack|signal@|raise@|kill@|pthread_create|__cxa_atexit' \
+          # FIX: Symbolname steht in Spalte 5 (nicht $NF)
+          # Zeilenformat in .rela.plt:
+          #   0000000001616090  0000001e00000402 R_AARCH64_JUMP_SLOT 0000000000000000 raise@LIBC + 0
+          #   $1=Offset $2=Info $3=Typ $4=SymbolVal $5=SymbolName $6/+ $7=Addend
+          awk '/R_AARCH64_JUMP_SLOT/ {print $1, $5}' "$OUT/rela_plt.txt" \
+            | grep -iE 'sigaction|sigaltstack|sigemptyset|signal@|raise@|kill@|pthread_create|__cxa_atexit' \
             > "$OUT/got_signal_slots.txt" || true
 
-          echo "=== .rela.plt Signal-Slots ===" | tee "$OUT/phase2_summary.txt"
-          cat "$OUT/got_signal_slots.txt"  | tee -a "$OUT/phase2_summary.txt" || true
+          {
+            echo "=== Phase 2 — libunity PLT/GOT ==="
+            echo "PLT-Zeilen:         $(wc -l < "$OUT/plt_full.txt" 2>/dev/null)"
+            echo "rela.plt-Einträge:  $(wc -l < "$OUT/rela_plt.txt" 2>/dev/null)"
+            echo "Signal-relevante:   $(wc -l < "$OUT/got_signal_slots.txt" 2>/dev/null)"
+            echo ""
+            echo "=== got_signal_slots.txt ==="
+            cat "$OUT/got_signal_slots.txt"
+          } > "$OUT/logs/phase2_summary.txt"
+
+          cat "$OUT/logs/phase2_summary.txt"
 
       # ============================================================
-      # PHASE 3: Aufrufer von sigaction@plt etc.
+      # PHASE 3 — Aufrufer von sigaction@plt etc.
       # ============================================================
-      - name: "Phase 3: Aufrufer von sigaction@plt etc."
+      - name: "Phase 3: Aufrufer von sigaction/signal/sigaltstack/etc."
         continue-on-error: true
         run: |
           LIB="analysis/deadeffect/libunity.so"
@@ -210,21 +266,27 @@ jobs:
           if not os.path.exists(src):
               raise SystemExit(0)
           lines = open(src, 'r', errors='replace').read().splitlines()
-          for sym in ['sigaction','signal','sigaltstack','raise','kill','pthread_create']:
+          out_dir = 'analysis/libunity'
+          summary = []
+          for sym in ['sigaction','signal','sigaltstack','raise','kill','pthread_create','__cxa_atexit']:
               hits = [i for i, ln in enumerate(lines) if f'{sym}@plt' in ln]
-              if not hits:
-                  continue
-              with open(f'analysis/libunity/callers_{sym}_context.txt', 'w') as f:
+              with open(f'{out_dir}/callers_{sym}_context.txt', 'w') as f:
                   for h in hits:
                       lo = max(0, h - 80)
                       hi = min(len(lines), h + 40)
                       f.write(f'\n===== {sym}@plt @Zeile {h} =====\n')
                       f.write('\n'.join(lines[lo:hi]))
                       f.write('\n')
+              summary.append(f'{sym:15s}  Aufrufe: {len(hits)}')
+          with open(f'{out_dir}/logs/phase3_summary.txt', 'w') as f:
+              f.write('=== Phase 3 — Aufrufer-Statistik (libunity) ===\n')
+              f.write('\n'.join(summary))
+              f.write('\n')
+          print('\n'.join(summary))
           PYEOF
 
       # ============================================================
-      # PHASE 4: init_array vollständig auflösen
+      # PHASE 4 — init_array (FIX: $4/$6 statt $5/$7)
       # ============================================================
       - name: "Phase 4: init_array auflösen"
         continue-on-error: true
@@ -233,9 +295,13 @@ jobs:
           OUT="analysis/libunity"
           [ -f "$LIB" ] || exit 0
 
-          awk '/\.init_array/ {print $5, $7; exit}' "$OUT/section_headers.txt" \
+          # FIX: readelf -SW Spaltenreihenfolge:
+          # [Nr] Name Type Address Off Size ES Flg Lk Inf Al
+          #   $1   $2   $3    $4     $5   $6   $7  ...
+          # Adresse = $4, Größe = $6
+          awk '/\.init_array[[:space:]]/ {print $4, $6; exit}' "$OUT/section_headers.txt" \
             > "$OUT/init_array_meta.txt" 2>&1 || true
-          cat "$OUT/init_array_meta.txt" || true
+          echo "init_array_meta: $(cat "$OUT/init_array_meta.txt")"
 
           python3 << 'PYEOF'
           import re, os
@@ -244,17 +310,20 @@ jobs:
               raise SystemExit(0)
           meta = open(meta_path).read().split()
           if len(meta) < 2:
+              print('init_array_meta unvollständig:', meta)
               raise SystemExit(0)
           init_addr = int(meta[0], 16)
           init_size = int(meta[1], 16)
           end = init_addr + init_size
+          print(f'init_array: 0x{init_addr:x} .. 0x{end:x}  ({init_size} Bytes)')
 
           entries = []
           for ln in open('analysis/libunity/relocations_full.txt', 'r', errors='replace'):
-              m = re.match(r'^([0-9a-f]+)\s+\S+\s+R_AARCH64_RELATIVE\s+([0-9a-f]+)', ln.strip())
+              m = re.match(r'^([0-9a-f]+)\s+\S+\s+R_AARCH64_RELATIVE\s+([0-9a-f]+)',
+                           ln.strip())
               if not m:
                   continue
-              off, add = int(m.group(1),16), int(m.group(2),16)
+              off, add = int(m.group(1), 16), int(m.group(2), 16)
               if init_addr <= off < end:
                   entries.append((off, add))
 
@@ -267,6 +336,11 @@ jobs:
           with open('analysis/libunity/init_array_targets.txt', 'w') as f:
               for _, add in entries:
                   f.write(f'0x{add:x}\n')
+
+          with open('analysis/libunity/logs/phase4_summary.txt', 'w') as f:
+              f.write(f'init_array: 0x{init_addr:x} .. 0x{end:x}\n')
+              f.write(f'Einträge gefunden: {len(entries)}\n')
+          print(f'Einträge gefunden: {len(entries)}')
           PYEOF
 
           if [ -s "$OUT/init_array_targets.txt" ]; then
@@ -282,7 +356,7 @@ jobs:
           fi
 
       # ============================================================
-      # PHASE 5: JNI_OnLoad Region + Callees
+      # PHASE 5 — JNI_OnLoad + Callees
       # ============================================================
       - name: "Phase 5: JNI_OnLoad & Callees"
         continue-on-error: true
@@ -291,10 +365,12 @@ jobs:
           OUT="analysis/libunity"
           [ -f "$LIB" ] || exit 0
 
-          aarch64-linux-gnu-objdump -d --start-address=0x65c468 --stop-address=0x65c7d8 "$LIB" \
+          aarch64-linux-gnu-objdump -d \
+            --start-address=0x65c468 --stop-address=0x65c7d8 "$LIB" \
             > "$OUT/disasm_JNI_OnLoad.txt" 2>&1 || true
 
-          grep -oE 'bl\s+[0-9a-f]+' "$OUT/disasm_JNI_OnLoad.txt" | awk '{print $2}' | sort -u \
+          grep -oE 'bl\s+[0-9a-f]+' "$OUT/disasm_JNI_OnLoad.txt" \
+            | awk '{print $2}' | sort -u \
             > "$OUT/jni_onload_callees.txt" || true
 
           : > "$OUT/disasm_jni_callees.txt"
@@ -308,10 +384,16 @@ jobs:
           grep -nE 'blr\s+x[0-9]+|br\s+x[0-9]+' "$OUT/disasm_JNI_OnLoad.txt" \
             > "$OUT/jni_indirect_calls.txt" || true
 
+          {
+            echo "=== Phase 5 — JNI_OnLoad ==="
+            echo "Callees: $(wc -l < "$OUT/jni_onload_callees.txt")"
+            echo "Indirekte Aufrufe in JNI_OnLoad: $(wc -l < "$OUT/jni_indirect_calls.txt")"
+          } > "$OUT/logs/phase5_summary.txt"
+
       # ============================================================
-      # PHASE 6: JNINativeMethod-Auflösung (Kernstück)
+      # PHASE 6 — JNINativeMethod-Auflösung (Kernstück)
       # ============================================================
-      - name: "Phase 6: JNINativeMethod-Auflösung"
+      - name: "Phase 6: JNINativeMethod-Auflösung (libunity)"
         continue-on-error: true
         run: |
           LIB="analysis/deadeffect/libunity.so"
@@ -342,6 +424,7 @@ jobs:
                   p = s.split()
                   off = int(p[1],16); va = int(p[2],16); fs = int(p[4],16)
                   loads.append((off, va, fs))
+
           def fo2va(fo):
               for off, va, fs in loads:
                   if off <= fo < off+fs:
@@ -350,7 +433,8 @@ jobs:
 
           relocs = []
           for ln in open(f'{out}/relocations_full.txt', 'r', errors='replace'):
-              m = re.match(r'^([0-9a-f]+)\s+\S+\s+R_AARCH64_RELATIVE\s+([0-9a-f]+)', ln.strip())
+              m = re.match(r'^([0-9a-f]+)\s+\S+\s+R_AARCH64_RELATIVE\s+([0-9a-f]+)',
+                           ln.strip())
               if m:
                   relocs.append((int(m.group(1),16), int(m.group(2),16)))
           print(f'R_AARCH64_RELATIVE Relocs: {len(relocs)}')
@@ -370,10 +454,8 @@ jobs:
               va = fo2va(idx)
               if va is None:
                   continue
-              struct_offs = add_to_off.get(va, [])
-              for off in struct_offs:
-                  fn_off = off + 16
-                  fn_target = off_to_add.get(fn_off)
+              for off in add_to_off.get(va, []):
+                  fn_target = off_to_add.get(off + 16)
                   results.append((m, va, off, fn_target))
 
           with open(f'{out}/native_functions.txt', 'w') as f:
@@ -386,6 +468,15 @@ jobs:
               for _,_,_,fn in results:
                   if fn is not None:
                       f.write(f'0x{fn:x}\n')
+
+          with open(f'{out}/logs/phase6_summary.txt', 'w') as f:
+              f.write(f'Methoden gesucht:  {len(methods)}\n')
+              f.write(f'Methoden gefunden: {len(results)}\n\n')
+              for m, va, off, fn in results:
+                  if fn:
+                      f.write(f'  {m:45s} fn=0x{fn:x}\n')
+                  else:
+                      f.write(f'  {m:45s} fn=N/A\n')
 
           print(f'Aufgelöste native Methoden: {len(results)}')
           for m, va, off, fn in results[:40]:
@@ -410,9 +501,9 @@ jobs:
           cat "$OUT/native_functions.txt" 2>/dev/null || true
 
       # ============================================================
-      # PHASE 7: Indirekte Aufrufe in nativen Funktionen
+      # PHASE 7 — Indirekte Aufrufe in nativen Funktionen
       # ============================================================
-      - name: "Phase 7: blr/br xN in nativen Funktionen"
+      - name: "Phase 7: blr/br xN in nativen Funktionen (libunity)"
         continue-on-error: true
         run: |
           OUT="analysis/libunity"
@@ -422,15 +513,21 @@ jobs:
             echo "### $F" >> "$OUT/native_indirect_calls.txt"
             grep -nE 'blr\s+x[0-9]+|br\s+x[0-9]+' "$F" >> "$OUT/native_indirect_calls.txt" || true
           done
+
+          {
+            echo "=== Phase 7 — indirekte Aufrufe (libunity) ==="
+            echo "Dateien: $(ls "$OUT"/native_fn_*.txt 2>/dev/null | wc -l)"
+            echo "Zeilen in native_indirect_calls.txt: $(wc -l < "$OUT/native_indirect_calls.txt")"
+          } > "$OUT/logs/phase7_summary.txt"
+
           head -200 "$OUT/native_indirect_calls.txt" || true
 
       # ============================================================
-      # PHASE 8: LIEF-Kontrolle (defensiv gegen API-Änderungen)
+      # PHASE 8 — LIEF (libunity → analysis/libunity/lief/)
       # ============================================================
-      - name: "Phase 8: LIEF Reloc-Kontrolle"
+      - name: "Phase 8: LIEF (pro Bibliothek)"
         continue-on-error: true
         run: |
-          mkdir -p analysis/lief
           python3 << 'PYEOF'
           import lief, os
 
@@ -443,11 +540,17 @@ jobs:
                       continue
               return default
 
-          libs = ['libunity', 'libil2cpp', 'libmain']
-          for lib in libs:
+          mapping = {
+              'libunity':  'analysis/libunity/lief',
+              'libil2cpp': 'analysis/libil2cpp/lief',
+              'libmain':   'analysis/libmain/lief',
+          }
+
+          for lib, outdir in mapping.items():
               p = f'analysis/deadeffect/{lib}.so'
               if not os.path.exists(p):
                   continue
+              os.makedirs(outdir, exist_ok=True)
               try:
                   b = lief.parse(p)
               except Exception as e:
@@ -456,7 +559,7 @@ jobs:
               if not b:
                   continue
 
-              with open(f'analysis/lief/{lib}.txt','w') as f:
+              with open(f'{outdir}/{lib}.txt', 'w') as f:
                   f.write(f'=== {lib}.so ===\n')
                   f.write(f'Format:             {safe(b, "format")}\n')
                   f.write(f'Arch:               {safe(b.header, "machine_type")}\n')
@@ -467,17 +570,15 @@ jobs:
                   f.write(f'Dynamic Symbols:    {len(b.dynamic_symbols)}\n')
                   f.write(f'Imported Functions: {len(b.imported_functions)}\n')
                   f.write(f'Exported Functions: {len(b.exported_functions)}\n')
-
                   f.write('\n=== Sections ===\n')
                   for s in b.sections:
                       f.write(f'{s.name:30s} addr=0x{s.virtual_address:08x} size={s.size:10d}\n')
-
                   f.write('\n=== Imported Functions ===\n')
                   for imp in b.imported_functions:
                       f.write(f'{imp}\n')
 
               if lib == 'libunity':
-                  with open(f'analysis/lief/{lib}_relocs_check.txt','w') as f:
+                  with open(f'{outdir}/{lib}_relocs_check.txt', 'w') as f:
                       try:
                           plts = list(b.pltgot_relocations)
                       except Exception:
@@ -495,128 +596,173 @@ jobs:
           PYEOF
 
       # ============================================================
-      # PHASE 9: radare2 – optional
+      # PHASE 9 — radare2 (pro Bibliothek)
       # ============================================================
-      - name: "Phase 9: radare2 – rabin2 (optional)"
+      - name: "Phase 9: radare2 – rabin2 (optional, pro Bibliothek)"
         continue-on-error: true
         run: |
-          mkdir -p analysis/radare2
           if ! command -v rabin2 >/dev/null 2>&1; then
-            echo "rabin2 nicht verfügbar – überspringe radare2-Phase"
-            echo "rabin2 not available" > analysis/radare2/SKIPPED.txt
+            echo "rabin2 nicht verfügbar – überspringe Phase 9"
+            echo "rabin2 not available" > analysis/libunity/radare2/SKIPPED.txt
             exit 0
           fi
-          for LIB in libunity libil2cpp libmain; do
+
+          for ENTRY in \
+            "libunity:analysis/libunity/radare2" \
+            "libil2cpp:analysis/libil2cpp/radare2" \
+            "libmain:analysis/libmain/radare2"; do
+            LIB="${ENTRY%%:*}"
+            OUT="${ENTRY##*:}"
             SRC="analysis/deadeffect/${LIB}.so"
-            if [ -f "$SRC" ]; then
-              rabin2 -s "$SRC" > analysis/radare2/${LIB}_symbols.txt 2>&1 || true
-              rabin2 -i "$SRC" > analysis/radare2/${LIB}_imports.txt 2>&1 || true
-              rabin2 -E "$SRC" > analysis/radare2/${LIB}_exports.txt 2>&1 || true
-              rabin2 -l "$SRC" > analysis/radare2/${LIB}_libraries.txt 2>&1 || true
-              rabin2 -S "$SRC" > analysis/radare2/${LIB}_sections.txt 2>&1 || true
-              rabin2 -z "$SRC" > analysis/radare2/${LIB}_strings.txt 2>&1 || true
-            fi
+            [ -f "$SRC" ] || continue
+            rabin2 -s "$SRC" > "$OUT/${LIB}_symbols.txt"     2>&1 || true
+            rabin2 -i "$SRC" > "$OUT/${LIB}_imports.txt"     2>&1 || true
+            rabin2 -E "$SRC" > "$OUT/${LIB}_exports.txt"     2>&1 || true
+            rabin2 -l "$SRC" > "$OUT/${LIB}_libraries.txt"   2>&1 || true
+            rabin2 -S "$SRC" > "$OUT/${LIB}_sections.txt"    2>&1 || true
+            rabin2 -z "$SRC" > "$OUT/${LIB}_strings.txt"     2>&1 || true
           done
 
       # ============================================================
-      # PHASE 10: pax-utils
+      # PHASE 10 — pax-utils (pro Bibliothek)
       # ============================================================
-      - name: "Phase 10: pax-utils – scanelf & dumpelf"
+      - name: "Phase 10: pax-utils – scanelf & dumpelf (pro Bibliothek)"
         continue-on-error: true
         run: |
-          mkdir -p analysis/paxutils
-          for LIB in libunity libil2cpp libmain; do
+          for ENTRY in \
+            "libunity:analysis/libunity/paxutils" \
+            "libil2cpp:analysis/libil2cpp/paxutils" \
+            "libmain:analysis/libmain/paxutils"; do
+            LIB="${ENTRY%%:*}"
+            OUT="${ENTRY##*:}"
             SRC="analysis/deadeffect/${LIB}.so"
-            if [ -f "$SRC" ]; then
-              echo "=== scanelf -a -s ${LIB} ===" > analysis/paxutils/${LIB}_scanelf.txt
-              scanelf -a -s "$SRC" >> analysis/paxutils/${LIB}_scanelf.txt 2>&1 || true
+            [ -f "$SRC" ] || continue
 
-              echo "=== dumpelf ${LIB} ===" > analysis/paxutils/${LIB}_dumpelf.txt
-              dumpelf "$SRC" >> analysis/paxutils/${LIB}_dumpelf.txt 2>&1 || true
+            {
+              echo "=== scanelf -a -s ${LIB} ==="
+              scanelf -a -s "$SRC"
+            } > "$OUT/${LIB}_scanelf.txt" 2>&1 || true
 
-              echo "=== scanelf -n (DT_NEEDED) ${LIB} ===" > analysis/paxutils/${LIB}_needed.txt
-              scanelf -n "$SRC" >> analysis/paxutils/${LIB}_needed.txt 2>&1 || true
-            fi
+            {
+              echo "=== dumpelf ${LIB} ==="
+              dumpelf "$SRC"
+            } > "$OUT/${LIB}_dumpelf.txt" 2>&1 || true
+
+            {
+              echo "=== scanelf -n (DT_NEEDED) ${LIB} ==="
+              scanelf -n "$SRC"
+            } > "$OUT/${LIB}_needed.txt" 2>&1 || true
           done
 
       # ============================================================
-      # PHASE 11: Zusammenfassung
+      # PHASE 11 — libunity-Log-Aggregation
       # ============================================================
-      - name: "Phase 11: Zusammenfassung"
+      - name: "Phase 11: libunity-Logs konsolidieren"
+        continue-on-error: true
+        run: |
+          LOG="analysis/libunity/logs"
+          mkdir -p "$LOG"
+
+          {
+            echo "=========================================="
+            echo "  LIBUNITY — KONSOLIDIERTE LOGS"
+            echo "=========================================="
+            echo ""
+            echo "### 1. Datei-Metadaten"
+            cat analysis/libunity/file.txt 2>/dev/null
+            echo ""
+            echo "### 2. init_array"
+            cat analysis/libunity/init_array_meta.txt 2>/dev/null
+            echo "Einträge: $(wc -l < analysis/libunity/init_array_targets.txt 2>/dev/null)"
+            echo ""
+            echo "### 3. Signal-Slots (.rela.plt)"
+            cat analysis/libunity/got_signal_slots.txt 2>/dev/null
+            echo ""
+            echo "### 4. sigaction@plt Aufrufer (Zeilen)"
+            cat analysis/libunity/callers_sigaction_plt.txt 2>/dev/null
+            echo ""
+            echo "### 5. sigaltstack@plt Aufrufer (Zeilen)"
+            cat analysis/libunity/callers_sigaltstack_plt.txt 2>/dev/null
+            echo ""
+            echo "### 6. raise@plt Aufrufer (Zeilen)"
+            cat analysis/libunity/callers_raise_plt.txt 2>/dev/null
+            echo ""
+            echo "### 7. kill@plt Aufrufer (Zeilen)"
+            cat analysis/libunity/callers_kill_plt.txt 2>/dev/null
+            echo ""
+            echo "### 8. pthread_create@plt Aufrufer (Zeilen)"
+            cat analysis/libunity/callers_pthread_create_plt.txt 2>/dev/null
+            echo ""
+            echo "### 9. __cxa_atexit@plt Aufrufer (Zeilen)"
+            cat analysis/libunity/callers___cxa_atexit_plt.txt 2>/dev/null
+            echo ""
+            echo "### 10. JNI_OnLoad Callees"
+            cat analysis/libunity/jni_onload_callees.txt 2>/dev/null
+            echo ""
+            echo "### 11. JNINativeMethod-Auflösung"
+            cat analysis/libunity/native_functions.txt 2>/dev/null
+            echo ""
+            echo "### 12. Native indirekte Aufrufe (blr/br xN)"
+            cat analysis/libunity/native_indirect_calls.txt 2>/dev/null
+          } > "$LOG/libunity_all.txt"
+
+          echo "Konsolidiert: $(wc -l < "$LOG/libunity_all.txt") Zeilen"
+          ls -la "$LOG"
+
+      # ============================================================
+      # PHASE 12 — Gesamt-Zusammenfassung
+      # ============================================================
+      - name: "Phase 12: Gesamt-Zusammenfassung"
         continue-on-error: true
         run: |
           {
             echo "=========================================="
-            echo "  DEAD EFFECT – ANALYSE-ZUSAMMENFASSUNG"
+            echo "  DEAD EFFECT — ANALYSE-ZUSAMMENFASSUNG"
             echo "=========================================="
             echo ""
-            echo "=== libunity.so ==="
-            echo "Dateigröße: $(stat -c%s analysis/deadeffect/libunity.so 2>/dev/null) Bytes"
-            echo "Exportierte Symbole: $(wc -l < analysis/libunity/symbols_exported.txt 2>/dev/null)"
-            echo "Importierte Symbole: $(wc -l < analysis/libunity/symbols_imported.txt 2>/dev/null)"
+            echo "=== Struktur ==="
+            find analysis -maxdepth 2 -type d | sort
             echo ""
-            echo "--- Native Methoden (Strings) ---"
+            echo "=== libunity.so ==="
+            echo "Größe:  $(stat -c%s analysis/deadeffect/libunity.so 2>/dev/null) Bytes"
+            echo "Export: $(wc -l < analysis/libunity/symbols_exported.txt 2>/dev/null)"
+            echo "Import: $(wc -l < analysis/libunity/symbols_imported.txt 2>/dev/null)"
+            echo ""
+            echo "=== libunity — native Methoden (Strings) ==="
             cat analysis/libunity/strings_native_methods.txt 2>/dev/null
             echo ""
-            echo "--- UnityPlayer-Klassen ---"
-            cat analysis/libunity/strings_unity_classes.txt 2>/dev/null
-            echo ""
-            echo "--- JNI-Klassen ---"
-            cat analysis/libunity/strings_jni_classes.txt 2>/dev/null
-            echo ""
-            echo "--- Importierte (unaufgelöste) Symbole (erste 80) ---"
-            head -80 analysis/libunity/symbols_imported.txt 2>/dev/null
-            echo ""
-            echo "=== Signal-Relocations (.rela.plt) ==="
+            echo "=== libunity — Signal-Slots ==="
             cat analysis/libunity/got_signal_slots.txt 2>/dev/null
             echo ""
-            echo "=== sigaction@plt Aufrufer ==="
-            cat analysis/libunity/callers_sigaction_plt.txt 2>/dev/null || echo "(keine)"
+            echo "=== libunity — sigaction@plt Aufrufer ==="
+            cat analysis/libunity/callers_sigaction_plt.txt 2>/dev/null
             echo ""
-            echo "=== signal@plt Aufrufer ==="
-            cat analysis/libunity/callers_signal_plt.txt 2>/dev/null || echo "(keine)"
+            echo "=== libunity — init_array Einträge ==="
+            echo "Gefunden: $(wc -l < analysis/libunity/init_array_targets.txt 2>/dev/null)"
             echo ""
-            echo "=== raise@plt Aufrufer ==="
-            cat analysis/libunity/callers_raise_plt.txt 2>/dev/null || echo "(keine)"
-            echo ""
-            echo "=== init_array (Meta) ==="
-            cat analysis/libunity/init_array_meta.txt 2>/dev/null
-            echo "Einträge: $(wc -l < analysis/libunity/init_array_targets.txt 2>/dev/null)"
-            echo ""
-            echo "=== init_array Zielfunktionen (erste 40) ==="
-            head -40 analysis/libunity/init_array_targets.txt 2>/dev/null
-            echo ""
-            echo "=== JNI_OnLoad Callees ==="
+            echo "=== libunity — JNI_OnLoad Callees ==="
             cat analysis/libunity/jni_onload_callees.txt 2>/dev/null
             echo ""
-            echo "=== JNI_OnLoad indirekte Aufrufe ==="
-            cat analysis/libunity/jni_indirect_calls.txt 2>/dev/null
+            echo "=== libunity — JNINativeMethod-Auflösung (Top 45) ==="
+            head -45 analysis/libunity/native_functions.txt 2>/dev/null
             echo ""
-            echo "=== JNINativeMethod-Auflösung ==="
-            cat analysis/libunity/native_functions.txt 2>/dev/null
-            echo ""
-            echo "=== Native indirekte Aufrufe (blr/br xN) – erste 100 ==="
-            head -100 analysis/libunity/native_indirect_calls.txt 2>/dev/null
+            echo "=== libunity — konsolidiertes Log ==="
+            echo "Datei: analysis/libunity/logs/libunity_all.txt"
+            echo "Zeilen: $(wc -l < analysis/libunity/logs/libunity_all.txt 2>/dev/null)"
             echo ""
             echo "=== libil2cpp.so ==="
-            echo "Dateigröße: $(stat -c%s analysis/deadeffect/libil2cpp.so 2>/dev/null) Bytes"
-            echo "Symbole: $(wc -l < analysis/libil2cpp/symbols_all.txt 2>/dev/null)"
+            echo "Größe: $(stat -c%s analysis/deadeffect/libil2cpp.so 2>/dev/null) Bytes"
             echo ""
-            echo "--- IL2CPP-Strings (erste 40) ---"
-            head -40 analysis/libil2cpp/strings_il2cpp.txt 2>/dev/null
-            echo ""
-            echo "=== LIEF: libunity Imported Functions (erste 60) ==="
-            grep -A 200 "=== Imported Functions ===" analysis/lief/libunity.txt 2>/dev/null | head -60
-            echo ""
-            echo "=== LIEF: libunity PLT Signal-Relocs ==="
-            cat analysis/lief/libunity_relocs_check.txt 2>/dev/null
-            echo ""
-            echo "=== radare2: libunity Imports (erste 60) ==="
-            head -60 analysis/radare2/libunity_imports.txt 2>/dev/null
+            echo "=== libmain.so ==="
+            echo "Größe: $(stat -c%s analysis/deadeffect/libmain.so 2>/dev/null) Bytes"
           } > analysis/summary.txt
 
           echo "summary.txt geschrieben."
+          cat analysis/summary.txt
 
+      # ============================================================
+      # UPLOAD
+      # ============================================================
       - name: "Upload Analysis Results"
         uses: actions/upload-artifact@v4
         with:
@@ -625,6 +771,7 @@ jobs:
             analysis/
             !analysis/libunity/disasm_full.txt
             !analysis/libmain/disasm_full.txt
+            !analysis/libil2cpp/disasm_full.txt
           retention-days: 90
 
       - name: "Display Key Findings"
@@ -633,26 +780,20 @@ jobs:
           echo "  ANALYSE ABGESCHLOSSEN"
           echo "=========================================="
           echo ""
-          echo "=== Signal-rel. PLT-Slots ==="
+          echo "=== Struktur ==="
+          find analysis -maxdepth 2 -type d | sort
+          echo ""
+          echo "=== libunity: Signal-Slots ==="
           cat analysis/libunity/got_signal_slots.txt 2>/dev/null || echo "(keine)"
           echo ""
-          echo "=== sigaction@plt Aufrufer ==="
+          echo "=== libunity: sigaction@plt Aufrufer ==="
           cat analysis/libunity/callers_sigaction_plt.txt 2>/dev/null || echo "(keine)"
           echo ""
-          echo "=== init_array Einträge ==="
+          echo "=== libunity: init_array Einträge ==="
           wc -l analysis/libunity/init_array_targets.txt 2>/dev/null || echo "0"
           echo ""
-          echo "=== JNINativeMethod-Auflösung (Top 40) ==="
-          head -40 analysis/libunity/native_functions.txt 2>/dev/null || echo "(keine)"
+          echo "=== libunity: native Methoden (Top 45) ==="
+          head -45 analysis/libunity/native_functions.txt 2>/dev/null || echo "(keine)"
           echo ""
-          echo "=== JNI_OnLoad Callees ==="
-          cat analysis/libunity/jni_onload_callees.txt 2>/dev/null || echo "(keine)"
-          echo ""
-          echo "=== libunity.so Native Methoden (Strings) ==="
-          cat analysis/libunity/strings_native_methods.txt 2>/dev/null || echo "(keine)"
-          echo ""
-          echo "=== libunity.so UnityPlayer-Klassen ==="
-          cat analysis/libunity/strings_unity_classes.txt 2>/dev/null || echo "(keine)"
-          echo ""
-          echo "=== libunity.so Importierte Symbole (erste 60) ==="
-          head -60 analysis/libunity/symbols_imported.txt 2>/dev/null || echo "(keine)"
+          echo "=== Konsolidiertes libunity-Log ==="
+          head -50 analysis/libunity/logs/libunity_all.txt 2>/dev/null || echo "(keine)"
