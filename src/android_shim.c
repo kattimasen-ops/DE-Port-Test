@@ -24,7 +24,6 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
-/* Vom Loader gesetzt: Adresse unseres echten Crash-Handlers */
 void (*g_de_crash_handler)(int, siginfo_t *, void *) = NULL;
 
 /* ------------------------------------------------------------ */
@@ -32,9 +31,7 @@ void (*g_de_crash_handler)(int, siginfo_t *, void *) = NULL;
 /* ------------------------------------------------------------ */
 int __android_log_print(int prio, const char *tag, const char *fmt, ...) {
     char buf[1024];
-    va_list ap;
-    int n;
-    (void)prio;
+    va_list ap; int n; (void)prio;
     va_start(ap, fmt);
     n = vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
@@ -43,8 +40,7 @@ int __android_log_print(int prio, const char *tag, const char *fmt, ...) {
     return n;
 }
 int __android_log_vprint(int prio, const char *tag, const char *fmt, va_list ap) {
-    char buf[1024];
-    int n; (void)prio;
+    char buf[1024]; int n; (void)prio;
     n = vsnprintf(buf, sizeof(buf), fmt, ap);
     fprintf(stderr, "[%s] %s\n", tag ? tag : "?", buf);
     fflush(stderr);
@@ -58,10 +54,12 @@ int __android_log_write(int prio, const char *tag, const char *text) {
 }
 
 /* ------------------------------------------------------------ */
-/* Intercept: sigaction / signal                                 */
+/* sigaction / signal Intercept                                  */
 /*                                                               */
-/* libunity installiert beim ersten Engine-Zugriff einen eigenen */
-/* SIGSEGV-Handler und killt damit unseren. Wir fangen das ab.   */
+/* WICHTIG: Wir lesen das Handler-Feld NICHT. libunity's        */
+/* struct-sigaction-Layout weicht vom glibc-Layout ab — das     */
+/* Feld am "falschen" Offset enthält Flags, nicht Pointer.       */
+/* Wir blockieren einfach alles für die 5 kritischen Signale.    */
 /* ------------------------------------------------------------ */
 static int is_protected_signal(int sig) {
     return sig == SIGSEGV || sig == SIGBUS || sig == SIGILL ||
@@ -73,28 +71,15 @@ int de_sigaction(int signum, const struct sigaction *act,
                  struct sigaction *oldact)
 {
     if (is_protected_signal(signum) && act) {
-        void *want = (act->sa_flags & SA_SIGINFO)
-                     ? (void *)act->sa_sigaction
-                     : (void *)act->sa_handler;
-
-        if (want == (void *)g_de_crash_handler ||
-            want == (void *)SIG_DFL ||
-            want == (void *)SIG_IGN)
-        {
-            /* OK, durchlassen — das ist unser eigener Aufruf */
-        } else {
-            /* libunity will unseren Handler ersetzen -> blockieren */
-            LOGI("[sigaction] BLOCKIERT signum=%d handler=%p (wir behalten %p)",
-                 signum, want, (void *)g_de_crash_handler);
-            if (oldact) {
-                memset(oldact, 0, sizeof(*oldact));
-                oldact->sa_sigaction = g_de_crash_handler;
-                oldact->sa_flags = SA_SIGINFO | SA_ONSTACK;
-            }
-            return 0;
+        LOGI("[sigaction] BLOCKIERT signum=%d (behalte 0x%p)",
+             signum, (void *)g_de_crash_handler);
+        if (oldact) {
+            memset(oldact, 0, sizeof(*oldact));
+            oldact->sa_sigaction = g_de_crash_handler;
+            oldact->sa_flags     = SA_SIGINFO | SA_ONSTACK;
         }
+        return 0;
     }
-    /* an libc durchreichen — direkt per Syscall, damit wir uns nicht selbst rufen */
     return (int)syscall(SYS_rt_sigaction, signum, act, oldact,
                         (long)sizeof(sigset_t));
 }
@@ -104,15 +89,8 @@ typedef void (*sighandler_t)(int);
 __attribute__((visibility("default")))
 sighandler_t de_signal(int signum, sighandler_t handler) {
     if (is_protected_signal(signum)) {
-        if (handler == (sighandler_t)g_de_crash_handler ||
-            handler == SIG_DFL || handler == SIG_IGN)
-        {
-            /* durchlassen */
-        } else {
-            LOGI("[signal] BLOCKIERT signum=%d handler=%p",
-                 signum, (void *)handler);
-            return SIG_DFL;
-        }
+        LOGI("[signal] BLOCKIERT signum=%d", signum);
+        return SIG_DFL;
     }
     struct sigaction sa, old;
     memset(&sa, 0, sizeof(sa));
@@ -124,6 +102,34 @@ sighandler_t de_signal(int signum, sighandler_t handler) {
         return old.sa_handler;
     return SIG_ERR;
 }
+
+/* ------------------------------------------------------------ */
+/* dlsym / dlopen Intercept                                      */
+/*                                                               */
+/* Wir rufen __libc_dlsym direkt (umgeht Interposition), damit   */
+/* wir nicht in Endlosrekursion geraten.                         */
+/* ------------------------------------------------------------ */
+extern void *__libc_dlsym(void *, const char *);
+extern void *__libc_dlopen_mode(const char *, int);
+
+__attribute__((visibility("default")))
+void *de_dlsym(void *handle, const char *symbol) {
+    void *ret = __libc_dlsym(handle, symbol);
+    LOGI("[dlsym] %s -> %p", symbol ? symbol : "?", ret);
+    return ret;
+}
+
+__attribute__((visibility("default")))
+void *de_dlopen(const char *path, int flags) {
+    void *ret = __libc_dlopen_mode(path, flags);
+    LOGI("[dlopen] %s (flags=0x%x) -> %p", path ? path : "?", flags, ret);
+    return ret;
+}
+
+/* ------------------------------------------------------------ */
+/* __sF — bionics FILE-Array (nur damit das Symbol existiert)    */
+/* ------------------------------------------------------------ */
+void *__sF[3] = { NULL, NULL, NULL };
 
 /* ------------------------------------------------------------ */
 /* ANativeWindow                                                 */
