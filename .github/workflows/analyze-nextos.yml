@@ -27,16 +27,31 @@ jobs:
             xxd \
             ripgrep \
             pax-utils \
-            radare2
+            git \
+            build-essential \
+            pkg-config \
+            meson \
+            ninja-build
 
           pip3 install --quiet lief
+
+      - name: Install radare2 (aus Git)
+        continue-on-error: true
+        run: |
+          set -e
+          cd /tmp
+          git clone --depth 1 --branch 5.9.8 https://github.com/radareorg/radare2.git
+          cd radare2
+          ./sys/install.sh --without-pull
+          rabin2 -v || true
+          r2 -v || true
 
       - name: Verify Tools
         run: |
           echo "=== Tool-Versionen ==="
           aarch64-linux-gnu-objdump --version | head -1
           aarch64-linux-gnu-readelf --version | head -1
-          rabin2 -v 2>&1 | head -1 || true
+          rabin2 -v 2>&1 | head -1 || echo "rabin2: NICHT verfügbar (nicht kritisch)"
           scanelf --version 2>&1 | head -1 || true
           python3 -c "import lief; print('LIEF', lief.__version__)" || true
 
@@ -63,7 +78,7 @@ jobs:
           fi
 
       # ============================================================
-      # PHASE 1: Basis-Analyse mit binutils
+      # PHASE 1: Basis-Analyse
       # ============================================================
       - name: "Phase 1: libmain.so – Basis-Analyse"
         run: |
@@ -155,7 +170,6 @@ jobs:
 
           aarch64-linux-gnu-objdump -d -j .plt "$LIB" > "$OUT/plt_full.txt" 2>&1 || true
 
-          # .rela.plt isolieren
           awk '/Relocation section .\.rela\.plt/,/^$/' "$OUT/relocations_full.txt" \
             > "$OUT/rela_plt.txt" || true
 
@@ -170,7 +184,7 @@ jobs:
           cat "$OUT/got_signal_slots.txt"  | tee -a "$OUT/phase2_summary.txt" || true
 
       # ============================================================
-      # PHASE 3: Aufrufer von sigaction@plt / signal@plt / raise@plt
+      # PHASE 3: Aufrufer von sigaction@plt etc.
       # ============================================================
       - name: "Phase 3: Aufrufer von sigaction@plt etc."
         continue-on-error: true
@@ -319,7 +333,6 @@ jobs:
 
           data = open(lib, 'rb').read()
 
-          # LOAD-Segmente auslesen (Datei-Offset -> vaddr)
           r = subprocess.run(['aarch64-linux-gnu-readelf','-lW',lib],
                              capture_output=True, text=True).stdout
           loads = []
@@ -327,7 +340,6 @@ jobs:
               s = ln.strip()
               if s.startswith('LOAD'):
                   p = s.split()
-                  # LOAD Offset VirtAddr PhysAddr FileSiz MemSiz Flg Align
                   off = int(p[1],16); va = int(p[2],16); fs = int(p[4],16)
                   loads.append((off, va, fs))
           def fo2va(fo):
@@ -336,7 +348,6 @@ jobs:
                       return va + (fo-off)
               return None
 
-          # Alle R_AARCH64_RELATIVE Relocs laden
           relocs = []
           for ln in open(f'{out}/relocations_full.txt', 'r', errors='replace'):
               m = re.match(r'^([0-9a-f]+)\s+\S+\s+R_AARCH64_RELATIVE\s+([0-9a-f]+)', ln.strip())
@@ -378,7 +389,10 @@ jobs:
 
           print(f'Aufgelöste native Methoden: {len(results)}')
           for m, va, off, fn in results[:40]:
-              print(f'  {m:45s} fn=0x{fn:x}' if fn else f'  {m:45s} fn=N/A')
+              if fn:
+                  print(f'  {m:45s} fn=0x{fn:x}')
+              else:
+                  print(f'  {m:45s} fn=N/A')
           PYEOF
 
           if [ -s "$OUT/native_function_addrs.txt" ]; then
@@ -411,7 +425,7 @@ jobs:
           head -200 "$OUT/native_indirect_calls.txt" || true
 
       # ============================================================
-      # PHASE 8: LIEF-Kontrolle (PLT-Relocs + Signal-Symbole)
+      # PHASE 8: LIEF-Kontrolle
       # ============================================================
       - name: "Phase 8: LIEF Reloc-Kontrolle"
         continue-on-error: true
@@ -448,7 +462,6 @@ jobs:
                   for imp in b.imported_functions:
                       f.write(f'{imp}\n')
 
-              # PLT-Relocs separat (nur libunity)
               if lib == 'libunity':
                   with open(f'analysis/lief/{lib}_relocs_check.txt','w') as f:
                       try:
@@ -463,12 +476,17 @@ jobs:
           PYEOF
 
       # ============================================================
-      # PHASE 9: radare2 – Symbole, Imports, Exports
+      # PHASE 9: radare2 – optional
       # ============================================================
-      - name: "Phase 9: radare2 – rabin2 Symbole, Imports, Exports"
+      - name: "Phase 9: radare2 – rabin2 (optional)"
         continue-on-error: true
         run: |
           mkdir -p analysis/radare2
+          if ! command -v rabin2 >/dev/null 2>&1; then
+            echo "rabin2 nicht verfügbar – überspringe radare2-Phase"
+            echo "rabin2 not available" > analysis/radare2/SKIPPED.txt
+            exit 0
+          fi
           for LIB in libunity libil2cpp libmain; do
             SRC="analysis/deadeffect/${LIB}.so"
             if [ -f "$SRC" ]; then
@@ -482,7 +500,7 @@ jobs:
           done
 
       # ============================================================
-      # PHASE 10: pax-utils – scanelf & dumpelf
+      # PHASE 10: pax-utils
       # ============================================================
       - name: "Phase 10: pax-utils – scanelf & dumpelf"
         continue-on-error: true
@@ -586,7 +604,6 @@ jobs:
           name: deadeffect-analysis
           path: |
             analysis/
-            !analysis/libunity/disasm_full.txt
             !analysis/libunity/disasm_full.txt
             !analysis/libmain/disasm_full.txt
           retention-days: 90
