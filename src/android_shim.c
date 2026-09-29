@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <dlfcn.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
@@ -16,6 +17,15 @@
 #include <android/native_window.h>
 #include <android/looper.h>
 #include <android/sensor.h>
+
+#ifndef DEAD_EFFECT_LIBDIR
+#define DEAD_EFFECT_LIBDIR "/roms/ports/DeadEffect/lib"
+#endif
+
+/* Aus so_util.h */
+extern void *so_load(const char *path);
+extern void *so_find_addr(void *handle, const char *name);
+extern int   so_is_our_handle(void *handle);
 
 /* ============================================================
  * Logging
@@ -145,7 +155,18 @@ int __system_property_set(const char *name, const char *value) { return 0; }
 int UnitySendMessage(const char *obj, const char *method, const char *msg) {
     (void)obj; (void)method; (void)msg; return 0;
 }
-FILE *__sF[3] = { NULL, NULL, NULL };
+
+/* FIX: __sF muss die echten stdio-Handles enthalten.
+ * Bionic-Code greift z.B. über __sF[1] auf stdout zu. */
+FILE *__sF[3];
+
+__attribute__((constructor))
+static void init_sF(void) {
+    __sF[0] = stdin;
+    __sF[1] = stdout;
+    __sF[2] = stderr;
+}
+
 unsigned char _binary_classes_dex_start[1] = {0};
 unsigned char _binary_classes_dex_end[1]   = {0};
 
@@ -195,6 +216,12 @@ int __FD_ISSET_chk(int fd, const fd_set *set, size_t set_size) {
     return 0;
 }
 
+/* NEU: __fdelt_chk wird von glibc-internem Fortify-Code importiert. */
+int __fdelt_chk(long int d) {
+    if (d < 0 || d >= FD_SETSIZE) return 0;
+    return (int)(d / __NFDBITS);
+}
+
 extern int __register_atfork(void (*prepare)(void),
                              void (*parent)(void),
                              void (*child)(void),
@@ -206,11 +233,44 @@ int pthread_atfork(void (*prepare)(void),
 }
 
 /* ============================================================
- * NEU: Fortify (_chk) Wrapper — aus den Switch-Ports
+ * dlopen/dlsym-Hook
  *
- * Android-Builds mit _FORTIFY_SOURCE=2 importieren diese
- * Symbole aus libc. glibc stellt sie nicht bereit → Linker
- * unresolved → wir liefern hier Durchreiche-Implementierungen.
+ * Unity ruft dlopen("libil2cpp.so") selbst auf, nachdem es
+ * initJni ausgeführt hat. Wir fangen das ab und liefern das
+ * von so_load erzeugte Handle zurück.
+ * ============================================================ */
+void *dlopen(const char *name, int flags) {
+    if (name && strstr(name, "libil2cpp.so")) {
+        static void *cached = NULL;
+        if (!cached) {
+            cached = so_load(name);
+            if (!cached) {
+                char full[512];
+                snprintf(full, sizeof(full), "%s/libil2cpp.so",
+                         DEAD_EFFECT_LIBDIR);
+                cached = so_load(full);
+            }
+            fprintf(stderr, "[dlopen-hook] libil2cpp.so -> %p\n", cached);
+        }
+        return cached;
+    }
+    static void *(*real)(const char *, int) = NULL;
+    if (!real) real = dlsym(RTLD_NEXT, "dlopen");
+    return real ? real(name, flags) : NULL;
+}
+
+void *dlsym(void *handle, const char *name) {
+    if (so_is_our_handle(handle)) {
+        void *p = so_find_addr(handle, name);
+        return p;
+    }
+    static void *(*real)(void *, const char *) = NULL;
+    if (!real) real = dlsym(RTLD_NEXT, "dlsym");
+    return real ? real(handle, name) : NULL;
+}
+
+/* ============================================================
+ * Fortify (_chk) Wrapper
  * ============================================================ */
 void *__memcpy_chk(void *dst, const void *src, size_t n, size_t dstlen) {
     (void)dstlen; return memcpy(dst, src, n);
