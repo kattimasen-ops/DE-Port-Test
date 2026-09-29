@@ -11,16 +11,12 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
-/* ============================================================
- * EGL-Kontext zwischenspeichern
- * ============================================================ */
 static EGLDisplay g_dpy  = EGL_NO_DISPLAY;
 static EGLSurface g_surf = EGL_NO_SURFACE;
 static EGLContext g_ctx  = EGL_NO_CONTEXT;
 
 void jni_shim_init(void) {
     LOGI("JNI-Shim initialisiert");
-    /* Wird spaeter durch jni_shim_set_egl ergaenzt */
 }
 
 void jni_shim_set_egl(EGLDisplay d, EGLSurface s, EGLContext c) {
@@ -30,15 +26,13 @@ void jni_shim_set_egl(EGLDisplay d, EGLSurface s, EGLContext c) {
 
 void jni_shim_handle_sdl_event(SDL_Event *ev) { (void)ev; }
 
-/* ============================================================
- * Native-Method-Registry
- * Wird von jni_env_RegisterNatives gefuellt, wenn libunity
- * (bzw. libmain/libil2cpp) ihre JNI-Natives anmeldet.
- * ============================================================ */
-#define JNI_MAX_NATIVES 256
+/* FIX: Unity 2019 + il2cpp registriert typischerweise 300–600
+ * Natives (UnityPlayer, Camera2Wrapper, HFPStatus, ...).
+ * 256 war zu klein → stille Drops → nativeRender nicht gefunden. */
+#define JNI_MAX_NATIVES 1024
 
 typedef struct {
-    const char *class_name;   /* aktuell ungenutzt, siehe jni_find_native */
+    const char *class_name;
     const char *method_name;
     const char *signature;
     void       *fn_ptr;
@@ -47,76 +41,35 @@ typedef struct {
 static jni_native_entry g_natives[JNI_MAX_NATIVES];
 static int              g_native_count = 0;
 
-/* ============================================================
- * Fake JNIEnv + JavaVM
- *
- * Ein JNIEnv ist ein Zeiger auf ein Struct, dessen erstes Feld
- * ein Zeiger auf eine Function-Table ist. Wir bauen beides statisch
- * auf und fuellen alle Slots mit einem Default-Stub, bevor wir
- * die wichtigen Slots mit echten Implementierungen ueberschreiben.
- * ============================================================ */
-
-/* Default-Stub: gibt 0 zurueck. Fuer alle Slots die wir nicht
- * brauchen. Unsauber vom Typprofil her, aber funktioniert auf ARM. */
 static uintptr_t jni_default_stub(void) { return 0; }
 
-/* Wir nehmen eine ueberdimensionierte Tabelle, damit auch bei
- * einer abweichenden JNI-Header-Version nichts daneben geht. */
 #define JNI_TABLE_SIZE 512
 #define JNI_VM_TABLE_SIZE 16
 
-/* JavaVM */
-typedef struct {
-    void *functions;
-} jni_vm_t;
-
+typedef struct { void *functions; } jni_vm_t;
 static uintptr_t     g_vm_table[JNI_VM_TABLE_SIZE];
 static jni_vm_t      g_vm_singleton;
 
-/* JNIEnv */
-typedef struct {
-    void *functions;
-} jni_env_t;
-
+typedef struct { void *functions; } jni_env_t;
 static uintptr_t     g_env_table[JNI_TABLE_SIZE];
 static jni_env_t     g_env_singleton;
-
-/* ============================================================
- * Konkrete JNI-Implementierungen
- * ============================================================ */
-
-/* --- JavaVM-Funktionen --- */
 
 static int jni_vm_GetEnv(void *vm, void **penv, int version) {
     (void)vm; (void)version;
     if (penv) *penv = &g_env_singleton;
     LOGI("JNI VM GetEnv -> %p (version 0x%x)", &g_env_singleton, version);
-    return 0;  /* JNI_OK */
+    return 0;
 }
-
 static int jni_vm_AttachCurrentThread(void *vm, void **penv, void *args) {
     (void)vm; (void)args;
     if (penv) *penv = &g_env_singleton;
     LOGI("JNI VM AttachCurrentThread");
     return 0;
 }
+static int jni_vm_DetachCurrentThread(void *vm) { (void)vm; return 0; }
+static int jni_vm_DestroyJavaVM(void *vm) { (void)vm; return 0; }
 
-static int jni_vm_DetachCurrentThread(void *vm) {
-    (void)vm;
-    return 0;
-}
-
-static int jni_vm_DestroyJavaVM(void *vm) {
-    (void)vm;
-    return 0;
-}
-
-/* --- JNIEnv-Funktionen --- */
-
-static int jni_env_GetVersion(void *env) {
-    (void)env;
-    return 0x00010006;  /* JNI_VERSION_1_6 */
-}
+static int jni_env_GetVersion(void *env) { (void)env; return 0x00010006; }
 
 static void *jni_env_FindClass(void *env, const char *name) {
     (void)env;
@@ -124,13 +77,11 @@ static void *jni_env_FindClass(void *env, const char *name) {
     static int fake_class = 1;
     return &fake_class;
 }
-
 static void *jni_env_GetObjectClass(void *env, void *obj) {
     (void)env; (void)obj;
     static int fake_class = 1;
     return &fake_class;
 }
-
 static void *jni_env_GetMethodID(void *env, void *cls,
                                  const char *name, const char *sig) {
     (void)env; (void)cls;
@@ -138,7 +89,6 @@ static void *jni_env_GetMethodID(void *env, void *cls,
     static int fake_mid = 1;
     return &fake_mid;
 }
-
 static void *jni_env_GetStaticMethodID(void *env, void *cls,
                                        const char *name, const char *sig) {
     (void)env; (void)cls;
@@ -146,7 +96,6 @@ static void *jni_env_GetStaticMethodID(void *env, void *cls,
     static int fake_mid = 1;
     return &fake_mid;
 }
-
 static void *jni_env_GetFieldID(void *env, void *cls,
                                 const char *name, const char *sig) {
     (void)env; (void)cls;
@@ -154,7 +103,6 @@ static void *jni_env_GetFieldID(void *env, void *cls,
     static int fake_fid = 1;
     return &fake_fid;
 }
-
 static void *jni_env_GetStaticFieldID(void *env, void *cls,
                                       const char *name, const char *sig) {
     (void)env; (void)cls;
@@ -163,7 +111,6 @@ static void *jni_env_GetStaticFieldID(void *env, void *cls,
     return &fake_fid;
 }
 
-/* --- RegisterNatives: speichert in Registry --- */
 static int jni_env_RegisterNatives(void *env, void *cls,
                                    const void *methods, int n) {
     (void)env; (void)cls;
@@ -188,63 +135,37 @@ static int jni_env_RegisterNatives(void *env, void *cls,
     LOGI("JNI RegisterNatives(count=%d), total=%d", n, g_native_count);
     return 0;
 }
-
-static int jni_env_UnregisterNatives(void *env, void *cls) {
-    (void)env; (void)cls;
-    return 0;
-}
-
-static void *jni_env_NewGlobalRef(void *env, void *obj) {
-    (void)env;
-    return obj;
-}
-
-static void *jni_env_NewLocalRef(void *env, void *obj) {
-    (void)env;
-    return obj;
-}
-
+static int jni_env_UnregisterNatives(void *env, void *cls) { (void)env; (void)cls; return 0; }
+static void *jni_env_NewGlobalRef(void *env, void *obj) { (void)env; return obj; }
+static void *jni_env_NewLocalRef(void *env, void *obj)  { (void)env; return obj; }
 static void jni_env_DeleteGlobalRef(void *env, void *obj) { (void)env; (void)obj; }
 static void jni_env_DeleteLocalRef(void *env, void *obj)  { (void)env; (void)obj; }
-
-static int jni_env_IsSameObject(void *env, void *a, void *b) {
-    (void)env;
-    return (a == b) ? 1 : 0;
-}
+static int jni_env_IsSameObject(void *env, void *a, void *b) { (void)env; return (a == b) ? 1 : 0; }
 
 static void *jni_env_NewStringUTF(void *env, const char *utf) {
     (void)env;
     LOGI("JNI NewStringUTF(%s)", utf ? utf : "(null)");
     return (void *)utf;
 }
-
 static const char *jni_env_GetStringUTFChars(void *env, void *jstr, unsigned char *isCopy) {
     (void)env;
     if (isCopy) *isCopy = 0;
     return (const char *)jstr;
 }
-
 static void jni_env_ReleaseStringUTFChars(void *env, void *jstr, const char *chars) {
     (void)env; (void)jstr; (void)chars;
 }
-
 static int jni_env_GetStringUTFLength(void *env, void *jstr) {
     (void)env;
     if (!jstr) return 0;
     return (int)strlen((const char *)jstr);
 }
-
 static int jni_env_GetStringLength(void *env, void *jstr) {
     (void)env;
     if (!jstr) return 0;
     return (int)strlen((const char *)jstr);
 }
-
-static void *jni_env_ExceptionOccurred(void *env) {
-    (void)env;
-    return NULL;
-}
-
+static void *jni_env_ExceptionOccurred(void *env) { (void)env; return NULL; }
 static void jni_env_ExceptionDescribe(void *env) { (void)env; }
 static void jni_env_ExceptionClear(void *env)    { (void)env; }
 static int  jni_env_ExceptionCheck(void *env)    { (void)env; return 0; }
@@ -254,74 +175,35 @@ static int jni_env_GetJavaVM(void *env, void **pvm) {
     if (pvm) *pvm = &g_vm_singleton;
     return 0;
 }
-
 static void *jni_env_NewObject(void *env, void *cls, void *mid, ...) {
     (void)env; (void)cls; (void)mid;
     static int fake_obj = 1;
     return &fake_obj;
 }
-
 static void *jni_env_AllocObject(void *env, void *cls) {
     (void)env; (void)cls;
     static int fake_obj = 1;
     return &fake_obj;
 }
-
-static uintptr_t jni_env_CallObjectMethod(void *env, void *obj, void *mid, ...) {
-    (void)env; (void)obj; (void)mid;
-    return 0;
-}
-static uintptr_t jni_env_CallIntMethod(void *env, void *obj, void *mid, ...) {
-    (void)env; (void)obj; (void)mid;
-    return 0;
-}
-static uintptr_t jni_env_CallBooleanMethod(void *env, void *obj, void *mid, ...) {
-    (void)env; (void)obj; (void)mid;
-    return 0;
-}
-static uintptr_t jni_env_CallVoidMethod(void *env, void *obj, void *mid, ...) {
-    (void)env; (void)obj; (void)mid;
-    return 0;
-}
-static uintptr_t jni_env_CallStaticObjectMethod(void *env, void *cls, void *mid, ...) {
-    (void)env; (void)cls; (void)mid;
-    return 0;
-}
-static uintptr_t jni_env_CallStaticVoidMethod(void *env, void *cls, void *mid, ...) {
-    (void)env; (void)cls; (void)mid;
-    return 0;
-}
-static uintptr_t jni_env_CallStaticIntMethod(void *env, void *cls, void *mid, ...) {
-    (void)env; (void)cls; (void)mid;
-    return 0;
-}
-
+static uintptr_t jni_env_CallObjectMethod(void *env, void *obj, void *mid, ...) { (void)env;(void)obj;(void)mid; return 0; }
+static uintptr_t jni_env_CallIntMethod(void *env, void *obj, void *mid, ...) { (void)env;(void)obj;(void)mid; return 0; }
+static uintptr_t jni_env_CallBooleanMethod(void *env, void *obj, void *mid, ...) { (void)env;(void)obj;(void)mid; return 0; }
+static uintptr_t jni_env_CallVoidMethod(void *env, void *obj, void *mid, ...) { (void)env;(void)obj;(void)mid; return 0; }
+static uintptr_t jni_env_CallStaticObjectMethod(void *env, void *cls, void *mid, ...) { (void)env;(void)cls;(void)mid; return 0; }
+static uintptr_t jni_env_CallStaticVoidMethod(void *env, void *cls, void *mid, ...) { (void)env;(void)cls;(void)mid; return 0; }
+static uintptr_t jni_env_CallStaticIntMethod(void *env, void *cls, void *mid, ...) { (void)env;(void)cls;(void)mid; return 0; }
 static void *jni_env_NewByteArray(void *env, int len) {
     (void)env; (void)len;
     static int fake_arr = 1;
     return &fake_arr;
 }
-static int jni_env_GetArrayLength(void *env, void *arr) {
-    (void)env; (void)arr;
-    return 0;
-}
-
-/* ============================================================
- * Tabellen initialisieren
- * ============================================================ */
+static int jni_env_GetArrayLength(void *env, void *arr) { (void)env; (void)arr; return 0; }
 
 #define ENV_GetVersion              4
-#define ENV_DefineClass             5
 #define ENV_FindClass               6
-#define ENV_GetSuperclass          10
-#define ENV_IsAssignableFrom       11
-#define ENV_Throw                  13
-#define ENV_ThrowNew               14
 #define ENV_ExceptionOccurred      15
 #define ENV_ExceptionDescribe      16
 #define ENV_ExceptionClear         17
-#define ENV_PushLocalFrame         19
-#define ENV_PopLocalFrame          20
 #define ENV_NewGlobalRef           21
 #define ENV_DeleteGlobalRef        22
 #define ENV_DeleteLocalRef         23
@@ -330,7 +212,6 @@ static int jni_env_GetArrayLength(void *env, void *arr) {
 #define ENV_AllocObject            27
 #define ENV_NewObject              28
 #define ENV_GetObjectClass         31
-#define ENV_IsInstanceOf           32
 #define ENV_GetMethodID            33
 #define ENV_CallObjectMethod       34
 #define ENV_CallBooleanMethod      37
@@ -344,10 +225,10 @@ static int jni_env_GetArrayLength(void *env, void *arr) {
 #define ENV_GetStaticFieldID      144
 #define ENV_NewString             163
 #define ENV_GetStringLength       164
-#define ENV_GetStringUTFChars     169
-#define ENV_ReleaseStringUTFChars 170
 #define ENV_NewStringUTF          167
 #define ENV_GetStringUTFLength    168
+#define ENV_GetStringUTFChars     169
+#define ENV_ReleaseStringUTFChars 170
 #define ENV_GetArrayLength        171
 #define ENV_NewByteArray          176
 #define ENV_RegisterNatives       215
@@ -367,49 +248,47 @@ static void jni_init_tables(void) {
     if (g_jni_initialized) return;
     g_jni_initialized = 1;
 
-    for (int i = 0; i < JNI_TABLE_SIZE; i++) {
+    for (int i = 0; i < JNI_TABLE_SIZE; i++)
         g_env_table[i] = (uintptr_t)jni_default_stub;
-    }
-    for (int i = 0; i < JNI_VM_TABLE_SIZE; i++) {
+    for (int i = 0; i < JNI_VM_TABLE_SIZE; i++)
         g_vm_table[i] = (uintptr_t)jni_default_stub;
-    }
 
-    g_env_table[ENV_GetVersion]            = (uintptr_t)jni_env_GetVersion;
-    g_env_table[ENV_FindClass]             = (uintptr_t)jni_env_FindClass;
-    g_env_table[ENV_ExceptionOccurred]     = (uintptr_t)jni_env_ExceptionOccurred;
-    g_env_table[ENV_ExceptionDescribe]     = (uintptr_t)jni_env_ExceptionDescribe;
-    g_env_table[ENV_ExceptionClear]        = (uintptr_t)jni_env_ExceptionClear;
-    g_env_table[ENV_NewGlobalRef]          = (uintptr_t)jni_env_NewGlobalRef;
-    g_env_table[ENV_DeleteGlobalRef]       = (uintptr_t)jni_env_DeleteGlobalRef;
-    g_env_table[ENV_DeleteLocalRef]        = (uintptr_t)jni_env_DeleteLocalRef;
-    g_env_table[ENV_IsSameObject]          = (uintptr_t)jni_env_IsSameObject;
-    g_env_table[ENV_NewLocalRef]           = (uintptr_t)jni_env_NewLocalRef;
-    g_env_table[ENV_AllocObject]           = (uintptr_t)jni_env_AllocObject;
-    g_env_table[ENV_NewObject]             = (uintptr_t)jni_env_NewObject;
-    g_env_table[ENV_GetObjectClass]        = (uintptr_t)jni_env_GetObjectClass;
-    g_env_table[ENV_GetMethodID]           = (uintptr_t)jni_env_GetMethodID;
-    g_env_table[ENV_CallObjectMethod]      = (uintptr_t)jni_env_CallObjectMethod;
-    g_env_table[ENV_CallBooleanMethod]     = (uintptr_t)jni_env_CallBooleanMethod;
-    g_env_table[ENV_CallIntMethod]         = (uintptr_t)jni_env_CallIntMethod;
-    g_env_table[ENV_CallVoidMethod]        = (uintptr_t)jni_env_CallVoidMethod;
-    g_env_table[ENV_GetFieldID]            = (uintptr_t)jni_env_GetFieldID;
-    g_env_table[ENV_GetStaticMethodID]     = (uintptr_t)jni_env_GetStaticMethodID;
-    g_env_table[ENV_CallStaticObjectMethod]= (uintptr_t)jni_env_CallStaticObjectMethod;
-    g_env_table[ENV_CallStaticVoidMethod]  = (uintptr_t)jni_env_CallStaticVoidMethod;
-    g_env_table[ENV_CallStaticIntMethod]   = (uintptr_t)jni_env_CallStaticIntMethod;
-    g_env_table[ENV_GetStaticFieldID]      = (uintptr_t)jni_env_GetStaticFieldID;
-    g_env_table[ENV_NewString]             = (uintptr_t)jni_env_NewStringUTF;
-    g_env_table[ENV_NewStringUTF]          = (uintptr_t)jni_env_NewStringUTF;
-    g_env_table[ENV_GetStringLength]       = (uintptr_t)jni_env_GetStringLength;
-    g_env_table[ENV_GetStringUTFLength]    = (uintptr_t)jni_env_GetStringUTFLength;
-    g_env_table[ENV_GetStringUTFChars]     = (uintptr_t)jni_env_GetStringUTFChars;
-    g_env_table[ENV_ReleaseStringUTFChars] = (uintptr_t)jni_env_ReleaseStringUTFChars;
-    g_env_table[ENV_GetArrayLength]        = (uintptr_t)jni_env_GetArrayLength;
-    g_env_table[ENV_NewByteArray]          = (uintptr_t)jni_env_NewByteArray;
-    g_env_table[ENV_RegisterNatives]       = (uintptr_t)jni_env_RegisterNatives;
-    g_env_table[ENV_UnregisterNatives]     = (uintptr_t)jni_env_UnregisterNatives;
-    g_env_table[ENV_GetJavaVM]             = (uintptr_t)jni_env_GetJavaVM;
-    g_env_table[ENV_ExceptionCheck]        = (uintptr_t)jni_env_ExceptionCheck;
+    g_env_table[ENV_GetVersion]             = (uintptr_t)jni_env_GetVersion;
+    g_env_table[ENV_FindClass]              = (uintptr_t)jni_env_FindClass;
+    g_env_table[ENV_ExceptionOccurred]      = (uintptr_t)jni_env_ExceptionOccurred;
+    g_env_table[ENV_ExceptionDescribe]      = (uintptr_t)jni_env_ExceptionDescribe;
+    g_env_table[ENV_ExceptionClear]         = (uintptr_t)jni_env_ExceptionClear;
+    g_env_table[ENV_NewGlobalRef]           = (uintptr_t)jni_env_NewGlobalRef;
+    g_env_table[ENV_DeleteGlobalRef]        = (uintptr_t)jni_env_DeleteGlobalRef;
+    g_env_table[ENV_DeleteLocalRef]         = (uintptr_t)jni_env_DeleteLocalRef;
+    g_env_table[ENV_IsSameObject]           = (uintptr_t)jni_env_IsSameObject;
+    g_env_table[ENV_NewLocalRef]            = (uintptr_t)jni_env_NewLocalRef;
+    g_env_table[ENV_AllocObject]            = (uintptr_t)jni_env_AllocObject;
+    g_env_table[ENV_NewObject]              = (uintptr_t)jni_env_NewObject;
+    g_env_table[ENV_GetObjectClass]         = (uintptr_t)jni_env_GetObjectClass;
+    g_env_table[ENV_GetMethodID]            = (uintptr_t)jni_env_GetMethodID;
+    g_env_table[ENV_CallObjectMethod]       = (uintptr_t)jni_env_CallObjectMethod;
+    g_env_table[ENV_CallBooleanMethod]      = (uintptr_t)jni_env_CallBooleanMethod;
+    g_env_table[ENV_CallIntMethod]          = (uintptr_t)jni_env_CallIntMethod;
+    g_env_table[ENV_CallVoidMethod]         = (uintptr_t)jni_env_CallVoidMethod;
+    g_env_table[ENV_GetFieldID]             = (uintptr_t)jni_env_GetFieldID;
+    g_env_table[ENV_GetStaticMethodID]      = (uintptr_t)jni_env_GetStaticMethodID;
+    g_env_table[ENV_CallStaticObjectMethod] = (uintptr_t)jni_env_CallStaticObjectMethod;
+    g_env_table[ENV_CallStaticVoidMethod]   = (uintptr_t)jni_env_CallStaticVoidMethod;
+    g_env_table[ENV_CallStaticIntMethod]    = (uintptr_t)jni_env_CallStaticIntMethod;
+    g_env_table[ENV_GetStaticFieldID]       = (uintptr_t)jni_env_GetStaticFieldID;
+    g_env_table[ENV_NewString]              = (uintptr_t)jni_env_NewStringUTF;
+    g_env_table[ENV_NewStringUTF]           = (uintptr_t)jni_env_NewStringUTF;
+    g_env_table[ENV_GetStringLength]        = (uintptr_t)jni_env_GetStringLength;
+    g_env_table[ENV_GetStringUTFLength]     = (uintptr_t)jni_env_GetStringUTFLength;
+    g_env_table[ENV_GetStringUTFChars]      = (uintptr_t)jni_env_GetStringUTFChars;
+    g_env_table[ENV_ReleaseStringUTFChars]  = (uintptr_t)jni_env_ReleaseStringUTFChars;
+    g_env_table[ENV_GetArrayLength]         = (uintptr_t)jni_env_GetArrayLength;
+    g_env_table[ENV_NewByteArray]           = (uintptr_t)jni_env_NewByteArray;
+    g_env_table[ENV_RegisterNatives]        = (uintptr_t)jni_env_RegisterNatives;
+    g_env_table[ENV_UnregisterNatives]      = (uintptr_t)jni_env_UnregisterNatives;
+    g_env_table[ENV_GetJavaVM]              = (uintptr_t)jni_env_GetJavaVM;
+    g_env_table[ENV_ExceptionCheck]         = (uintptr_t)jni_env_ExceptionCheck;
 
     g_vm_table[VM_DestroyJavaVM]       = (uintptr_t)jni_vm_DestroyJavaVM;
     g_vm_table[VM_AttachCurrentThread] = (uintptr_t)jni_vm_AttachCurrentThread;
@@ -423,19 +302,9 @@ static void jni_init_tables(void) {
          &g_env_singleton, &g_vm_singleton);
 }
 
-void *jni_get_env(void) {
-    jni_init_tables();
-    return &g_env_singleton;
-}
+void *jni_get_env(void) { jni_init_tables(); return &g_env_singleton; }
+void *jni_get_vm(void)  { jni_init_tables(); return &g_vm_singleton; }
 
-void *jni_get_vm(void) {
-    jni_init_tables();
-    return &g_vm_singleton;
-}
-
-/* ============================================================
- * Native-Method-Registry: Ausgabe + Suche
- * ============================================================ */
 void jni_dump_natives(void) {
     jni_init_tables();
     LOGI("=== JNI Registry: %d Methoden ===", g_native_count);
@@ -448,9 +317,7 @@ void jni_dump_natives(void) {
 }
 
 void *jni_find_native(const char *class_name, const char *method_name) {
-    (void)class_name;  /* aktuell nur nach Methodenname suchen,
-                        * da FindClass() allen Klassen denselben
-                        * Fake-Zeiger liefert. */
+    (void)class_name;
     jni_init_tables();
     if (!method_name) return NULL;
     for (int i = 0; i < g_native_count; i++) {
@@ -462,9 +329,6 @@ void *jni_find_native(const char *class_name, const char *method_name) {
     return NULL;
 }
 
-/* ============================================================
- * NativeLoader-Aufruf (Legacy, wird im neuen Flow nicht mehr genutzt)
- * ============================================================ */
 int jni_call_native_loader(const char *cls, const char *method, const char *arg) {
     LOGI("jni_call_native_loader(%s.%s, %s)", cls, method, arg);
     extern void *so_find_addr(void *handle, const char *name);
