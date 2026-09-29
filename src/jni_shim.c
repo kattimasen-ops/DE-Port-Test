@@ -26,9 +26,6 @@ void jni_shim_set_egl(EGLDisplay d, EGLSurface s, EGLContext c) {
 
 void jni_shim_handle_sdl_event(SDL_Event *ev) { (void)ev; }
 
-/* FIX: Unity 2019 + il2cpp registriert typischerweise 300–600
- * Natives (UnityPlayer, Camera2Wrapper, HFPStatus, ...).
- * 256 war zu klein → stille Drops → nativeRender nicht gefunden. */
 #define JNI_MAX_NATIVES 1024
 
 typedef struct {
@@ -54,6 +51,13 @@ typedef struct { void *functions; } jni_env_t;
 static uintptr_t     g_env_table[JNI_TABLE_SIZE];
 static jni_env_t     g_env_singleton;
 
+/* FIX: Groessere Puffer fuer Fake-Objekte.
+ * Unity liest ueber diese Zeiger hinaus, ein int (4 Byte) ist zu klein. */
+static uint8_t g_fake_class_storage[64] = {0};
+static uint8_t g_fake_mid_storage[64]   = {0};
+static uint8_t g_fake_fid_storage[64]   = {0};
+static uint8_t g_fake_obj_storage[64]   = {0};
+
 static int jni_vm_GetEnv(void *vm, void **penv, int version) {
     (void)vm; (void)version;
     if (penv) *penv = &g_env_singleton;
@@ -74,41 +78,35 @@ static int jni_env_GetVersion(void *env) { (void)env; return 0x00010006; }
 static void *jni_env_FindClass(void *env, const char *name) {
     (void)env;
     LOGI("JNI FindClass(%s)", name ? name : "?");
-    static int fake_class = 1;
-    return &fake_class;
+    return g_fake_class_storage;
 }
 static void *jni_env_GetObjectClass(void *env, void *obj) {
     (void)env; (void)obj;
-    static int fake_class = 1;
-    return &fake_class;
+    return g_fake_class_storage;
 }
 static void *jni_env_GetMethodID(void *env, void *cls,
                                  const char *name, const char *sig) {
     (void)env; (void)cls;
     LOGI("JNI GetMethodID(%s, %s)", name ? name : "?", sig ? sig : "?");
-    static int fake_mid = 1;
-    return &fake_mid;
+    return g_fake_mid_storage;
 }
 static void *jni_env_GetStaticMethodID(void *env, void *cls,
                                        const char *name, const char *sig) {
     (void)env; (void)cls;
     LOGI("JNI GetStaticMethodID(%s, %s)", name ? name : "?", sig ? sig : "?");
-    static int fake_mid = 1;
-    return &fake_mid;
+    return g_fake_mid_storage;
 }
 static void *jni_env_GetFieldID(void *env, void *cls,
                                 const char *name, const char *sig) {
     (void)env; (void)cls;
     LOGI("JNI GetFieldID(%s, %s)", name ? name : "?", sig ? sig : "?");
-    static int fake_fid = 1;
-    return &fake_fid;
+    return g_fake_fid_storage;
 }
 static void *jni_env_GetStaticFieldID(void *env, void *cls,
                                       const char *name, const char *sig) {
     (void)env; (void)cls;
     LOGI("JNI GetStaticFieldID(%s, %s)", name ? name : "?", sig ? sig : "?");
-    static int fake_fid = 1;
-    return &fake_fid;
+    return g_fake_fid_storage;
 }
 
 static int jni_env_RegisterNatives(void *env, void *cls,
@@ -177,13 +175,11 @@ static int jni_env_GetJavaVM(void *env, void **pvm) {
 }
 static void *jni_env_NewObject(void *env, void *cls, void *mid, ...) {
     (void)env; (void)cls; (void)mid;
-    static int fake_obj = 1;
-    return &fake_obj;
+    return g_fake_obj_storage;
 }
 static void *jni_env_AllocObject(void *env, void *cls) {
     (void)env; (void)cls;
-    static int fake_obj = 1;
-    return &fake_obj;
+    return g_fake_obj_storage;
 }
 static uintptr_t jni_env_CallObjectMethod(void *env, void *obj, void *mid, ...) { (void)env;(void)obj;(void)mid; return 0; }
 static uintptr_t jni_env_CallIntMethod(void *env, void *obj, void *mid, ...) { (void)env;(void)obj;(void)mid; return 0; }
@@ -194,10 +190,21 @@ static uintptr_t jni_env_CallStaticVoidMethod(void *env, void *cls, void *mid, .
 static uintptr_t jni_env_CallStaticIntMethod(void *env, void *cls, void *mid, ...) { (void)env;(void)cls;(void)mid; return 0; }
 static void *jni_env_NewByteArray(void *env, int len) {
     (void)env; (void)len;
-    static int fake_arr = 1;
-    return &fake_arr;
+    return g_fake_obj_storage;
 }
 static int jni_env_GetArrayLength(void *env, void *arr) { (void)env; (void)arr; return 0; }
+
+/* FIX: NewString korrekt implementieren (UTF-16 -> UTF-8) */
+static void *jni_env_NewString(void *env, const jchar *unicode, int len) {
+    (void)env;
+    if (!unicode || len <= 0) return (void *)"";
+    char *out = malloc(len + 1);
+    if (!out) return NULL;
+    for (int i = 0; i < len; i++) out[i] = (char)(unicode[i] & 0xFF);
+    out[len] = 0;
+    LOGI("JNI NewString(%d) -> %s", len, out);
+    return out;
+}
 
 #define ENV_GetVersion              4
 #define ENV_FindClass               6
@@ -277,7 +284,7 @@ static void jni_init_tables(void) {
     g_env_table[ENV_CallStaticVoidMethod]   = (uintptr_t)jni_env_CallStaticVoidMethod;
     g_env_table[ENV_CallStaticIntMethod]    = (uintptr_t)jni_env_CallStaticIntMethod;
     g_env_table[ENV_GetStaticFieldID]       = (uintptr_t)jni_env_GetStaticFieldID;
-    g_env_table[ENV_NewString]              = (uintptr_t)jni_env_NewStringUTF;
+    g_env_table[ENV_NewString]              = (uintptr_t)jni_env_NewString;
     g_env_table[ENV_NewStringUTF]           = (uintptr_t)jni_env_NewStringUTF;
     g_env_table[ENV_GetStringLength]        = (uintptr_t)jni_env_GetStringLength;
     g_env_table[ENV_GetStringUTFLength]     = (uintptr_t)jni_env_GetStringUTFLength;
