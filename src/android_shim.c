@@ -55,11 +55,6 @@ int __android_log_write(int prio, const char *tag, const char *text) {
 
 /* ------------------------------------------------------------ */
 /* sigaction / signal Intercept                                  */
-/*                                                               */
-/* WICHTIG: Wir lesen das Handler-Feld NICHT. libunity's        */
-/* struct-sigaction-Layout weicht vom glibc-Layout ab — das     */
-/* Feld am "falschen" Offset enthält Flags, nicht Pointer.       */
-/* Wir blockieren einfach alles für die 5 kritischen Signale.    */
 /* ------------------------------------------------------------ */
 static int is_protected_signal(int sig) {
     return sig == SIGSEGV || sig == SIGBUS || sig == SIGILL ||
@@ -71,7 +66,7 @@ int de_sigaction(int signum, const struct sigaction *act,
                  struct sigaction *oldact)
 {
     if (is_protected_signal(signum) && act) {
-        LOGI("[sigaction] BLOCKIERT signum=%d (behalte 0x%p)",
+        LOGI("[sigaction] BLOCKIERT signum=%d (behalte %p)",
              signum, (void *)g_de_crash_handler);
         if (oldact) {
             memset(oldact, 0, sizeof(*oldact));
@@ -105,9 +100,6 @@ sighandler_t de_signal(int signum, sighandler_t handler) {
 
 /* ------------------------------------------------------------ */
 /* dlsym / dlopen Intercept                                      */
-/*                                                               */
-/* Wir rufen __libc_dlsym direkt (umgeht Interposition), damit   */
-/* wir nicht in Endlosrekursion geraten.                         */
 /* ------------------------------------------------------------ */
 extern void *__libc_dlsym(void *, const char *);
 extern void *__libc_dlopen_mode(const char *, int);
@@ -124,6 +116,44 @@ void *de_dlopen(const char *path, int flags) {
     void *ret = __libc_dlopen_mode(path, flags);
     LOGI("[dlopen] %s (flags=0x%x) -> %p", path ? path : "?", flags, ret);
     return ret;
+}
+
+/* ------------------------------------------------------------ */
+/* pthread_create Intercept                                      */
+/*                                                               */
+/* Das ist der eigentliche Täter: libunity spawnt einen Thread   */
+/* mit start_routine==NULL. Wir blockieren das und loggen den    */
+/* Caller, damit wir den aufrufenden Code auflösen können.       */
+/* ------------------------------------------------------------ */
+typedef int (*real_pthread_create_t)(pthread_t *, const pthread_attr_t *,
+                                     void *(*)(void *), void *);
+static real_pthread_create_t g_real_pthread_create = NULL;
+
+static void resolve_real_pthread_create(void) {
+    if (g_real_pthread_create) return;
+    g_real_pthread_create = (real_pthread_create_t)dlsym(RTLD_NEXT,
+                                                          "pthread_create");
+    if (!g_real_pthread_create) {
+        LOGE("[pthread_create] RTLD_NEXT dlsym fehlgeschlagen");
+    }
+}
+
+__attribute__((visibility("default")))
+int de_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+                      void *(*start_routine)(void *), void *arg)
+{
+    void *caller = __builtin_return_address(0);
+    LOGI("[pthread_create] thread=%p attr=%p start_routine=%p arg=%p caller=%p",
+         (void *)thread, (const void *)attr, (void *)start_routine, arg, caller);
+
+    if (!start_routine) {
+        LOGE("[pthread_create] *** start_routine ist NULL — BLOCKIERT ***");
+        LOGE("[pthread_create] Caller war: %p", caller);
+        return EINVAL;
+    }
+    resolve_real_pthread_create();
+    if (!g_real_pthread_create) return EAGAIN;
+    return g_real_pthread_create(thread, attr, start_routine, arg);
 }
 
 /* ------------------------------------------------------------ */
