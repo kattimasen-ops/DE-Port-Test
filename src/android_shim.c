@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <time.h>
 #include <errno.h>
 #include <pthread.h>
@@ -16,6 +17,44 @@
 #define TAG "deadeffect-android"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+
+/* ================================================================
+ * __android_log_* : eigene Implementierung auf stderr
+ *
+ * Es gibt auf Linux/glibc KEIN liblog. Die Symbole werden von
+ * libunity, libil2cpp, libmain und von unseren eigenen Quellen
+ * (ueber android/log.h) gebraucht und muessen hier definiert
+ * werden — sonst schlaegt der Link fehl.
+ * ================================================================ */
+int __android_log_print(int prio, const char *tag, const char *fmt, ...) {
+    char buf[1024];
+    va_list ap;
+    int n;
+    (void)prio;
+    va_start(ap, fmt);
+    n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    fprintf(stderr, "[%s] %s\n", tag ? tag : "?", buf);
+    fflush(stderr);
+    return n;
+}
+
+int __android_log_vprint(int prio, const char *tag, const char *fmt, va_list ap) {
+    char buf[1024];
+    int n;
+    (void)prio;
+    n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    fprintf(stderr, "[%s] %s\n", tag ? tag : "?", buf);
+    fflush(stderr);
+    return n;
+}
+
+int __android_log_write(int prio, const char *tag, const char *text) {
+    (void)prio;
+    fprintf(stderr, "[%s] %s\n", tag ? tag : "?", text ? text : "");
+    fflush(stderr);
+    return text ? (int)strlen(text) : 0;
+}
 
 /* ================================================================
  * ANativeWindow Fake
@@ -113,10 +152,6 @@ int __system_property_get(const char *name, char *value) {
 
 /* ================================================================
  * pthread_cond_timedwait Normalisierung
- *
- * Unity uebergibt absolute Zeitstempel auf Basis von CLOCK_MONOTONIC.
- * glibc erwartet standardmaessig CLOCK_REALTIME.
- * Diese Wrapper-Funktion rechnet um.
  * ================================================================ */
 typedef int (*real_cond_timedwait_t)(pthread_cond_t *, pthread_mutex_t *,
                                      const struct timespec *);
@@ -141,16 +176,11 @@ int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
     if (!abstime)
         return g_real_cond_timedwait(cond, mutex, NULL);
 
-    /* Absolute Zeit in relative Zeit umrechnen */
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
 
-    /* Wenn abstime weit in der Zukunft liegt (> 1 Jahr),
-     * behandeln wir es als CLOCK_REALTIME-Interpretation
-     * und korrigieren. Andernfalls nutzen wir es direkt. */
     time_t sec_diff = abstime->tv_sec - now.tv_sec;
     if (sec_diff < 0) {
-        /* Timeout bereits abgelaufen */
         return ETIMEDOUT;
     }
 
@@ -162,7 +192,6 @@ int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
         rel.tv_nsec += 1000000000L;
     }
 
-    /* Umrechnung auf absolute CLOCK_REALTIME-Zeit fuer glibc */
     struct timespec real_now;
     clock_gettime(CLOCK_REALTIME, &real_now);
     struct timespec real_abs;
@@ -177,17 +206,10 @@ int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
 }
 
 /* ================================================================
- * Fortify-Wrapper (verhindern Endlosrekursion)
- *
- * WICHTIG: Signatur MUSS exakt der glibc-Deklaration entsprechen:
+ * Fortify-Wrapper — Signatur MUSS der glibc-Deklaration entsprechen:
  *   extern long int __fdelt_chk (long int __d);
- * Sonst: "conflicting types for '__fdelt_chk'"
  * ================================================================ */
 long int __fdelt_chk(long int fd) {
     if (fd < 0 || fd >= 1024) return fd % 1024;
     return fd / 64;
 }
-
-/* ================================================================
- * __android_log_print ist in liblog, wir linken direkt
- * ================================================================ */
