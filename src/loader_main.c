@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
+#include <sys/syscall.h>
 #include <SDL2/SDL.h>
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
@@ -19,7 +20,6 @@
 #include "so_util.h"
 #include "jni_shim.h"
 
-/* Adresse unseres echten Crash-Handlers an den sigaction-Intercept */
 extern void (*g_de_crash_handler)(int, siginfo_t *, void *);
 
 #define TAG "deadeffect"
@@ -36,9 +36,6 @@ extern void (*g_de_crash_handler)(int, siginfo_t *, void *);
 #define DEAD_EFFECT_CRASHLOG "/roms/ports/DeadEffect/crash.txt"
 #endif
 
-/* ------------------------------------------------------------ */
-/* Rohe, signal-sichere Ausgabe                                 */
-/* ------------------------------------------------------------ */
 __attribute__((noinline))
 static void rawlog(const char *s) {
     size_t n = 0;
@@ -46,15 +43,13 @@ static void rawlog(const char *s) {
     if (n) { ssize_t r = write(2, s, n); (void)r; }
 }
 
-/* Schreibt einen String sowohl auf stderr als auch in crash.txt. */
 __attribute__((noinline))
 static void crash_write(const char *s) {
     size_t n = 0;
     while (s[n]) n++;
     if (!n) return;
     ssize_t r = write(2, s, n); (void)r;
-    int fd = open(DEAD_EFFECT_CRASHLOG,
-                  O_WRONLY | O_CREAT | O_APPEND, 0644);
+    int fd = open(DEAD_EFFECT_CRASHLOG, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd >= 0) {
         ssize_t r2 = write(fd, s, n); (void)r2;
         close(fd);
@@ -69,18 +64,14 @@ static void crash_write_hex(uint64_t v) {
     int started = 0;
     for (int i = 15; i >= 0; i--) {
         int nib = (v >> (i * 4)) & 0xF;
-        if (nib || started || i == 0) {
-            buf[n++] = hx[nib];
-            started = 1;
-        }
+        if (nib || started || i == 0) { buf[n++] = hx[nib]; started = 1; }
     }
     buf[n] = 0;
     crash_write(buf);
 }
 
 static void crash_write_dec(int v) {
-    char t[16];
-    int n = 0;
+    char t[16]; int n = 0;
     if (v < 0) { crash_write("-"); v = -v; }
     if (v == 0) { crash_write("0"); return; }
     while (v > 0 && n < 15) { t[n++] = '0' + (v % 10); v /= 10; }
@@ -90,14 +81,47 @@ static void crash_write_dec(int v) {
     crash_write(o);
 }
 
-/* ------------------------------------------------------------ */
-/* Crash-Handler: minimal, ohne FP-Walk                          */
-/* ------------------------------------------------------------ */
+/* Stack-Dump: 16 Zeilen à 4 Wörter (32 Bytes pro Zeile) ab SP. */
+static void crash_dump_stack(uint64_t sp) {
+    if (!sp || sp < 0x1000 || (sp & 7) != 0) return;
+    crash_write("### STACK DUMP (SP to SP+512) ###\n");
+    const char *hx = "0123456789abcdef";
+    volatile uint64_t *p = (volatile uint64_t *)sp;
+    for (int i = 0; i < 16; i++) {
+        char buf[256];
+        int n = 0;
+        buf[n++] = 'S'; buf[n++] = 'P'; buf[n++] = '+';
+        uint64_t addr = (i * 32);
+        char tmp[16]; int k = 0;
+        if (addr == 0) tmp[k++] = '0';
+        else while (addr > 0 && k < 15) { tmp[k++] = '0' + (addr % 10); addr /= 10; }
+        for (int j = k - 1; j >= 0; j--) buf[n++] = tmp[j];
+        buf[n++] = ':';
+        for (int w = 0; w < 4; w++) {
+            buf[n++] = ' ';
+            uint64_t v = 0;
+            /* Sicher lesen — falls SP+512 über Seitengrenze geht, wird das
+             * höchstens einen zweiten Fault auslösen. Das ist akzeptabel. */
+            v = p[i * 4 + w];
+            buf[n++] = '0'; buf[n++] = 'x';
+            for (int b = 15; b >= 0; b--) {
+                buf[n++] = hx[(v >> (b * 4)) & 0xF];
+            }
+        }
+        buf[n++] = '\n'; buf[n] = 0;
+        crash_write(buf);
+    }
+    crash_write("### END STACK DUMP ###\n");
+}
+
 __attribute__((noinline))
 static void crash_handler(int sig, siginfo_t *info, void *uctx) {
-    /* ERSTE Ausgabe, bevor irgendetwas schiefgehen kann */
+    int tid = (int)syscall(SYS_gettid);
+
     crash_write("\n### SIG=");
     crash_write_dec(sig);
+    crash_write(" TID=");
+    crash_write_dec(tid);
     crash_write(" ###\n");
 
     if (!uctx) {
@@ -138,8 +162,9 @@ static void crash_handler(int sig, siginfo_t *info, void *uctx) {
     crash_write_hex((uint64_t)uc->uc_mcontext.regs[29]);
     crash_write(" ###\n");
 
-    /* KEIN FP-Walk - der kann im Handler selbst faulten. */
-    crash_write("### END (no FP-walk) ###\n");
+    crash_dump_stack((uint64_t)uc->uc_mcontext.sp);
+
+    crash_write("### END (handler) ###\n");
     _exit(128 + sig);
 }
 
@@ -165,7 +190,6 @@ static void install_crash_handler(void) {
     sigaction(SIGABRT, &sa, NULL);
 }
 
-/* Verifikation: ist wirklich unser Handler aktiv? */
 static void verify_sigsegv_handler(const char *where) {
     struct sigaction cur;
     memset(&cur, 0, sizeof(cur));
@@ -182,7 +206,7 @@ static void *crash_handler_watchdog(void *arg) {
     (void)arg;
     for (;;) {
         install_crash_handler();
-        usleep(2000); /* 2 ms */
+        usleep(2000);
     }
     return NULL;
 }
@@ -365,13 +389,10 @@ int main(int argc, char **argv) {
     (void)argc; (void)argv;
     rawlog("[boot] main() entered\n");
 
-    /* Core-Dumps aktivieren (falls ulimit im Wrapper gesetzt) */
     prctl(PR_SET_DUMPABLE, 1, 0, 0, 0);
     struct rlimit rl = { RLIM_INFINITY, RLIM_INFINITY };
     setrlimit(RLIMIT_CORE, &rl);
 
-    /* Unseren Handler an den sigaction-Intercept bekannt machen,
-     * BEVOR irgendetwas installiert wird oder libunity lädt. */
     g_de_crash_handler = crash_handler;
 
     install_crash_handler();
