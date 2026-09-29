@@ -151,7 +151,18 @@ static void install_crash_handler(void) {
     sigaction(SIGILL,  &sa, NULL);
     sigaction(SIGFPE,  &sa, NULL);
     sigaction(SIGABRT, &sa, NULL);
-    rawlog("[boot] crash handler installed\n");
+}
+
+/* Watchdog-Thread: libunity ueberschreibt den Crash-Handler waehrend
+ * nativeSendSurfaceChangedEvent. Dieser Thread setzt unseren Handler
+ * kontinuierlich neu, damit er beim Crash aktiv ist. */
+static void *crash_handler_watchdog(void *arg) {
+    (void)arg;
+    for (;;) {
+        install_crash_handler();
+        usleep(100000);  /* 100 ms */
+    }
+    return NULL;
 }
 
 void abort(void) {
@@ -164,17 +175,9 @@ void *g_libmain_handle   = NULL;
 void *g_libunity_handle  = NULL;
 void *g_libil2cpp_handle = NULL;
 
-/* Dummy-jobject fuer UnityPlayer.
- *
- * FALSCH (vorher): (void*)0x1 — kein gueltiges jobject, Unity dereferenziert
- *                  ihn und crasht.
- * RICHTIG (jetzt): Ein statisch alloziertes Objekt mit ausreichend Platz.
- *                  Es muss keine echte Java-Klasse sein, aber es muss eine
- *                  gueltige, dereferenzierbare Adresse haben. */
 static struct {
-    void *class_ref;      /* Platzhalter fuer die jclass-Referenz */
-    uint8_t payload[64];  /* zusaetzlicher Puffer, damit GetFieldID-Zugriffe
-                           * nicht aus dem Objekt herauslaufen */
+    void *class_ref;
+    uint8_t payload[256];
 } g_fake_unity_player_obj = {0};
 
 static void *g_unity_player_thiz = &g_fake_unity_player_obj;
@@ -332,11 +335,7 @@ int main(int argc, char **argv) {
     (void)argc; (void)argv;
     rawlog("[boot] main() entered\n");
     install_crash_handler();
-    rawlog("[boot] libdir=");
-    rawlog(DEAD_EFFECT_LIBDIR);
-    rawlog(" assets=");
-    rawlog(DEAD_EFFECT_ASSETS);
-    rawlog("\n");
+    rawlog("[boot] crash handler installed\n");
 
     LOGI("Dead Effect Loader startet");
     LOGI("  libdir = %s", DEAD_EFFECT_LIBDIR);
@@ -355,13 +354,18 @@ int main(int argc, char **argv) {
     if (load_module_chain() != 0) { rawlog("[boot] load_module_chain failed\n"); return 1; }
     rawlog("[boot] load_module_chain done\n");
 
-    rawlog("[boot] re-install crash handler after module load\n");
-    install_crash_handler();
+    rawlog("[boot] starting crash handler watchdog...\n");
+    pthread_t watchdog;
+    if (pthread_create(&watchdog, NULL, crash_handler_watchdog, NULL) != 0) {
+        rawlog("[boot] WARN: watchdog thread creation failed\n");
+    } else {
+        rawlog("[boot] watchdog thread started\n");
+    }
 
     jni_shim_set_egl(egl_dpy, egl_surf, egl_ctx);
     void *env = jni_get_env();
 
-    LOGI("g_unity_player_thiz = %p (statisches Objekt)", g_unity_player_thiz);
+    LOGI("g_unity_player_thiz = %p (statisches Objekt, 256+ Bytes)", g_unity_player_thiz);
 
     /* --- 1. Surface Callbacks --- */
     if (unity_native_surface_changed) {
