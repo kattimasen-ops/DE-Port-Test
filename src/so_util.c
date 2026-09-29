@@ -368,13 +368,13 @@ void *so_find_addr(void *handle, const char *name) {
     return NULL;
 }
 
-/* NEU: prüft, ob ein Handle von uns stammt. Wird vom dlsym-Hook
- * verwendet, um zwischen echten libdl-Handles und unseren
- * so_module-Zeigern zu unterscheiden. */
+/* FIX: so_load() gibt &g_modules[i] zurück (den so_module*),
+ * NICHT g_modules[i].base. Daher hier gegen den Modul-Zeiger
+ * vergleichen, nicht gegen die mmap-Adresse. */
 int so_is_our_handle(void *handle) {
     if (!handle) return 0;
     for (int i = 0; i < g_nmods; i++) {
-        if (g_modules[i].base == handle) return 1;
+        if ((void *)&g_modules[i] == handle) return 1;
     }
     return 0;
 }
