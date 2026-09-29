@@ -44,7 +44,7 @@ jobs:
           DOWNLOADED=0
           for URL in "${URLS[@]}"; do
             echo "Versuche: $URL"
-            if wget -q -L --max-time 60 "$URL" -O il2cpp.zip 2>/dev/null; then
+            if wget -q -L -T 60 "$URL" -O il2cpp.zip 2>/dev/null; then
               if unzip -t il2cpp.zip >/dev/null 2>&1; then
                 echo "Download OK: $(stat -c%s il2cpp.zip) Bytes"
                 DOWNLOADED=1
@@ -87,11 +87,11 @@ jobs:
           fi
           echo "r2unity-Installation abgeschlossen (oder uebersprungen)"
 
-      - name: "Download Dead Effect Libs aus Release"
+      - name: "Download Dead Effect Libs aus Release V1"
         run: |
           mkdir -p analysis/deadeffect
           echo "Lade arm64-v8a.zip herunter..."
-          wget -q -L --max-time 300 \
+          wget -q -L -T 300 \
             "https://github.com/kattimasen-ops/DE-Port-Test/releases/download/V1/arm64-v8a.zip" \
             -O /tmp/arm64-v8a.zip
 
