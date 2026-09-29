@@ -30,41 +30,77 @@ jobs:
           dotnet-version: '8.0.x'
 
       - name: Install Il2CppInspectorRedux
+        continue-on-error: true
         run: |
           mkdir -p tools && cd tools
-          wget -q https://github.com/LukeFZ/Il2CppInspectorRedux/releases/latest/download/Il2CppInspectorRedux-CLI-linux-x64.zip -O il2cpp.zip 2>/dev/null || \
-          wget -q https://github.com/LukeFZ/Il2CppInspectorRedux/releases/download/2025.1/Il2CppInspectorRedux-CLI-linux-x64.zip -O il2cpp.zip 2>/dev/null || true
-          if [ -f il2cpp.zip ]; then
+          echo "Versuche Il2CppInspector herunterzuladen..."
+
+          URLS=(
+            "https://github.com/LukeFZ/Il2CppInspectorRedux/releases/latest/download/Il2CppInspectorRedux-CLI-linux-x64.zip"
+            "https://github.com/LukeFZ/Il2CppInspectorRedux/releases/download/2025.1/Il2CppInspectorRedux-CLI-linux-x64.zip"
+            "https://github.com/LukeFZ/Il2CppInspectorRedux/releases/download/v2025.1/Il2CppInspectorRedux-CLI-linux-x64.zip"
+          )
+
+          DOWNLOADED=0
+          for URL in "${URLS[@]}"; do
+            echo "Versuche: $URL"
+            if wget -q -L --max-time 60 "$URL" -O il2cpp.zip 2>/dev/null; then
+              if unzip -t il2cpp.zip >/dev/null 2>&1; then
+                echo "Download OK: $(stat -c%s il2cpp.zip) Bytes"
+                DOWNLOADED=1
+                break
+              else
+                echo "Keine gueltige ZIP - probiere naechste URL"
+                rm -f il2cpp.zip
+              fi
+            else
+              echo "Download fehlgeschlagen"
+            fi
+          done
+
+          if [ "$DOWNLOADED" = "1" ]; then
             unzip -o il2cpp.zip -d Il2CppInspectorRedux
             chmod +x Il2CppInspectorRedux/* 2>/dev/null || true
+            echo "=== Il2CppInspector installiert ==="
             ls -la Il2CppInspectorRedux/
+          else
+            echo "Il2CppInspector konnte nicht geladen werden - wird uebersprungen"
+            rm -f il2cpp.zip
           fi
           cd ..
 
       - name: Install r2unity
+        continue-on-error: true
         run: |
           git clone --depth 1 https://github.com/radareorg/radare2.git tools/radare2 2>/dev/null || true
           if [ -d tools/radare2 ]; then
-            cd tools/radare2 && ./sys/install.sh 2>&1 | tail -3 && cd ../..
+            cd tools/radare2
+            ./sys/install.sh 2>&1 | tail -3 || true
+            cd ../..
           fi
           git clone --depth 1 https://github.com/radareorg/r2unity.git tools/r2unity 2>/dev/null || true
           if [ -d tools/r2unity ]; then
-            cd tools/r2unity && make 2>&1 | tail -5 || true
+            cd tools/r2unity
+            make 2>&1 | tail -5 || true
             [ -f r2unity ] && sudo cp r2unity /usr/local/bin/ 2>/dev/null || true
             cd ../..
           fi
+          echo "r2unity-Installation abgeschlossen (oder uebersprungen)"
 
       - name: "Download Dead Effect Libs aus Release"
         run: |
           mkdir -p analysis/deadeffect
           echo "Lade arm64-v8a.zip herunter..."
-          wget -q "https://github.com/kattimasen-ops/DE-Port-Test/releases/download/V1/arm64-v8a.zip" -O /tmp/arm64-v8a.zip
+          wget -q -L --max-time 300 \
+            "https://github.com/kattimasen-ops/DE-Port-Test/releases/download/V1/arm64-v8a.zip" \
+            -O /tmp/arm64-v8a.zip
+
           if [ -f /tmp/arm64-v8a.zip ]; then
             echo "Download erfolgreich: $(stat -c%s /tmp/arm64-v8a.zip) Bytes"
             unzip -o /tmp/arm64-v8a.zip -d /tmp/de_libs/
             echo "=== Entpackte Struktur ==="
             find /tmp/de_libs/ -type f | head -20
-            # Kopiere die benötigten Dateien (rekursiv suchen)
+
             find /tmp/de_libs/ -name "libunity.so" -exec cp {} analysis/deadeffect/ \; 2>/dev/null || true
             find /tmp/de_libs/ -name "libil2cpp.so" -exec cp {} analysis/deadeffect/ \; 2>/dev/null || true
             find /tmp/de_libs/ -name "global-metadata.dat" -exec cp {} analysis/deadeffect/ \; 2>/dev/null || true
@@ -73,6 +109,7 @@ jobs:
           else
             echo "Download fehlgeschlagen!" > analysis/deadeffect/error.txt
           fi
+
           echo "=== Dead Effect Libs ==="
           ls -la analysis/deadeffect/
 
@@ -169,26 +206,41 @@ jobs:
           fi
 
       - name: "Analyse: Il2CppInspector (Dead Effect)"
+        continue-on-error: true
         run: |
           mkdir -p analysis/il2cpp
           IL2CPP="analysis/deadeffect/libil2cpp.so"
           META="analysis/deadeffect/global-metadata.dat"
           TOOL=$(find tools/Il2CppInspectorRedux -name "Il2CppInspector*" -type f 2>/dev/null | head -1)
-          if [ -n "$TOOL" ] && [ -f "$IL2CPP" ] && [ -f "$META" ]; then
-            chmod +x "$TOOL"
-            "$TOOL" --bin "$IL2CPP" --metadata "$META" --cs-out analysis/il2cpp/types.cs --json-out analysis/il2cpp/metadata.json 2>&1 | tee analysis/il2cpp/output.txt || true
-            grep -i "nativeSendSurface\|nativeFocus\|nativeResume\|nativeRender" analysis/il2cpp/*.json analysis/il2cpp/*.cs 2>/dev/null | head -50 > analysis/il2cpp/native_methods.txt || true
-          else
-            echo "Il2CppInspector oder Eingabedateien fehlen" > analysis/il2cpp/error.txt
-            ls -la tools/Il2CppInspectorRedux/ 2>/dev/null || true
-            ls -la analysis/deadeffect/ 2>/dev/null || true
+
+          if [ -z "$TOOL" ]; then
+            echo "Il2CppInspector nicht installiert - ueberspringe diesen Schritt"
+            echo "Il2CppInspector nicht installiert" > analysis/il2cpp/error.txt
+            exit 0
           fi
+
+          if [ ! -f "$IL2CPP" ] || [ ! -f "$META" ]; then
+            echo "Eingabedateien fehlen:"
+            echo "  IL2CPP: $IL2CPP ($([ -f "$IL2CPP" ] && echo OK || echo FEHLT))"
+            echo "  META:   $META ($([ -f "$META" ] && echo OK || echo FEHLT))"
+            echo "Eingabedateien fehlen" > analysis/il2cpp/error.txt
+            exit 0
+          fi
+
+          chmod +x "$TOOL"
+          "$TOOL" --bin "$IL2CPP" --metadata "$META" \
+            --cs-out analysis/il2cpp/types.cs \
+            --json-out analysis/il2cpp/metadata.json 2>&1 | tee analysis/il2cpp/output.txt || true
+
+          grep -i "nativeSendSurface\|nativeFocus\|nativeResume\|nativeRender" \
+            analysis/il2cpp/*.json analysis/il2cpp/*.cs 2>/dev/null | head -50 \
+            > analysis/il2cpp/native_methods.txt || true
 
       - name: "Vergleich: NextOS vs Dead Effect"
         run: |
           {
             echo "=== NEXTOS LOADER: JNI-STRINGS ==="
-            cat analysis/nextos_loader/strings_jni.txt 2>/dev/null || echo "(nicht verfügbar)"
+            cat analysis/nextos_loader/strings_jni.txt 2>/dev/null || echo "(nicht verfuegbar)"
             echo ""
             echo "=== NEXTOS LOADER: FALSOJNI HITS ==="
             cat analysis/nextos_loader/falsojni_hits.txt 2>/dev/null || echo "(keine)"
@@ -197,10 +249,10 @@ jobs:
             cat analysis/nextos_loader/jvm_hits.txt 2>/dev/null || echo "(keine)"
             echo ""
             echo "=== NEXTOS: SYMBOLE ==="
-            head -50 analysis/nextos_loader/nm_dynamic.txt 2>/dev/null || echo "(nicht verfügbar)"
+            head -50 analysis/nextos_loader/nm_dynamic.txt 2>/dev/null || echo "(nicht verfuegbar)"
             echo ""
             echo "=== DEAD EFFECT: NATIVE METHODEN ==="
-            cat analysis/deadeffect_analysis/strings_native.txt 2>/dev/null || echo "(nicht verfügbar)"
+            cat analysis/deadeffect_analysis/strings_native.txt 2>/dev/null || echo "(nicht verfuegbar)"
           } > analysis/comparison.txt
 
       - name: "Upload All Analysis Results"
