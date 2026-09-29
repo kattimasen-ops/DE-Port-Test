@@ -1,4 +1,5 @@
-#define _GNU_SOURCE
+/* KEIN #define _GNU_SOURCE mehr — kommt aus CFLAGS (-D_GNU_SOURCE).
+ * Sonst Re-Define-Warnung. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -216,10 +217,13 @@ int __FD_ISSET_chk(int fd, const fd_set *set, size_t set_size) {
     return 0;
 }
 
-/* NEU: __fdelt_chk wird von glibc-internem Fortify-Code importiert. */
-int __fdelt_chk(long int d) {
+/* FIX: glibc deklariert
+ *   extern long int __fdelt_chk (long int __d);
+ * in bits/select2.h. Rückgabetyp MUSS long int sein, sonst
+ * "conflicting types"-Fehler. */
+long int __fdelt_chk(long int d) {
     if (d < 0 || d >= FD_SETSIZE) return 0;
-    return (int)(d / __NFDBITS);
+    return (long int)(d / __NFDBITS);
 }
 
 extern int __register_atfork(void (*prepare)(void),
