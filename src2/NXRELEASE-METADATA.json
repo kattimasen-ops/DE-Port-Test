@@ -1,0 +1,294 @@
+{
+  "archive": {
+    "compression": "deflated",
+    "source_date_epoch": 1786406400
+  },
+  "audit_exceptions": [],
+  "dependencies": [
+    {
+      "architecture": "aarch64",
+      "namespace": "linux",
+      "provider": "firmware",
+      "soname": "libEGL.so"
+    },
+    {
+      "architecture": "aarch64",
+      "namespace": "linux",
+      "provider": "firmware",
+      "soname": "libGLESv2.so"
+    },
+    {
+      "architecture": "aarch64",
+      "namespace": "linux",
+      "provider": "portmaster",
+      "soname": "libSDL2-2.0.so.0"
+    },
+    {
+      "architecture": "aarch64",
+      "namespace": "linux",
+      "provider": "glibc-base",
+      "soname": "libc.so.6"
+    },
+    {
+      "architecture": "aarch64",
+      "namespace": "linux",
+      "provider": "glibc-base",
+      "soname": "libdl.so.2"
+    },
+    {
+      "architecture": "aarch64",
+      "namespace": "linux",
+      "provider": "firmware",
+      "soname": "libgcc_s.so.1"
+    },
+    {
+      "architecture": "aarch64",
+      "namespace": "linux",
+      "provider": "glibc-base",
+      "soname": "libm.so.6"
+    },
+    {
+      "architecture": "aarch64",
+      "namespace": "linux",
+      "provider": "glibc-base",
+      "soname": "libpthread.so.0"
+    },
+    {
+      "architecture": "aarch64",
+      "namespace": "linux",
+      "provider": "firmware",
+      "soname": "libz.so.1"
+    }
+  ],
+  "elf_audit": {
+    "count": 2,
+    "files": [
+      {
+        "architecture": "aarch64",
+        "build_id": "dee4a133649c7f9b93c0dfa443579080e14439fb",
+        "build_profile": "universal-low-glibc",
+        "class": "ELF64",
+        "cxxabi_max": null,
+        "data": "little-endian",
+        "elf_type": "DYN",
+        "flags": "0x0",
+        "glibc_max": "2.17",
+        "glibcxx_max": null,
+        "interpreter": "/lib/ld-linux-aarch64.so.1",
+        "kind": "project-linux",
+        "machine": "AArch64",
+        "namespace": "linux",
+        "needed": [
+          "libEGL.so",
+          "libGLESv2.so",
+          "libSDL2-2.0.so.0",
+          "libc.so.6",
+          "libdl.so.2",
+          "libgcc_s.so.1",
+          "libm.so.6",
+          "libpthread.so.0",
+          "libz.so.1"
+        ],
+        "path": "deadtrigger/deadtrigger-nextos",
+        "provenance": "build_universal.sh; pinned AArch64 GCC 16.1.0 objects with Buster libc headers; pinned offline Debian Buster image sha256:036c7910ea53bc78cc213452afa92fa83d55de1c51ae54f315af58b5a41a45cf for link and strip",
+        "sha256": "d43d1fbcceb365d6c575316d84cbed85a9dd2e68bec0356b91c383dbf7f8146d",
+        "soname": null
+      },
+      {
+        "architecture": "aarch64",
+        "build_id": "2d1786b69fb2aa4d3e54e5a0bc73d5826cb692fb",
+        "build_profile": "universal-low-glibc",
+        "class": "ELF64",
+        "cxxabi_max": null,
+        "data": "little-endian",
+        "elf_type": "DYN",
+        "flags": "0x0",
+        "glibc_max": "2.17",
+        "glibcxx_max": null,
+        "interpreter": "/lib/ld-linux-aarch64.so.1",
+        "kind": "third-party-linux",
+        "machine": "AArch64",
+        "namespace": "linux",
+        "needed": [
+          "libc.so.6",
+          "libdl.so.2"
+        ],
+        "path": "deadtrigger/nxextract/nxextract-ui",
+        "provenance": "unmodified canonical NXExtract 1.2.6 UI; MIT; content-pinned AArch64 GLIBC_2.17 build",
+        "sha256": "046afb583f5a211c946495e639409f81d9cfec706788eeccb7924b0e8e5a50b6",
+        "soname": null
+      }
+    ],
+    "max_glibc_seen": "2.17",
+    "public_ceiling": "2.30"
+  },
+  "input_manifest_sha256": "4c7dadddfa02e1afab5a8f4f0759ab640e7caba3f1b1d49e4d260fa43896172e",
+  "inventory": [
+    {
+      "kind": "launcher",
+      "mode": "0755",
+      "path": "Dead Trigger.sh",
+      "sha256": "2b38e7cd0c263756638b0b5bda36b762bb7009e867984a86de350cc589f2fa8e"
+    },
+    {
+      "kind": "license-notice",
+      "mode": "0644",
+      "path": "deadtrigger/DATA-NOTICE.txt",
+      "sha256": "b94525099f4d7e029e43df931940c065718ef6ea1ea04ebd76f47305f70a295e"
+    },
+    {
+      "kind": "payload",
+      "mode": "0644",
+      "path": "deadtrigger/INSTALLATION.md",
+      "sha256": "aadfdbaa93f98af68122a30dfd405e24b09909a061cc9ebf0ca92a5812a1787c"
+    },
+    {
+      "kind": "license-notice",
+      "mode": "0644",
+      "path": "deadtrigger/LICENSE",
+      "sha256": "fd48a1afc565e3b27d07ca190012389f5c0f377abd7285e779c75c58540171ce"
+    },
+    {
+      "kind": "license-notice",
+      "mode": "0644",
+      "path": "deadtrigger/NOTICE.md",
+      "sha256": "5722117b89cbede7ce30c83d464f5a2960a50f7a7624551ef8f95b681f91377f"
+    },
+    {
+      "kind": "payload",
+      "mode": "0644",
+      "path": "deadtrigger/README.md",
+      "sha256": "4a9b22897ab01bead4765d1c05e543a4b1bf0d67505cc6acc606f7b886b9291e"
+    },
+    {
+      "kind": "project-linux",
+      "mode": "0755",
+      "path": "deadtrigger/deadtrigger-nextos",
+      "sha256": "d43d1fbcceb365d6c575316d84cbed85a9dd2e68bec0356b91c383dbf7f8146d"
+    },
+    {
+      "kind": "nxextract-recipe",
+      "mode": "0644",
+      "path": "deadtrigger/extractor.json",
+      "sha256": "03361a5efc93bcc87709bc5fe7aa3dbb1f855e74c4cccb2f5e534dd7c668ee79"
+    },
+    {
+      "kind": "payload",
+      "mode": "0644",
+      "path": "deadtrigger/gamedata/README.txt",
+      "sha256": "be905dd76ce2de37664c80c5d426c2f3fef4f52f345ca247d0e1b72050cd07f8"
+    },
+    {
+      "kind": "license-notice",
+      "mode": "0644",
+      "path": "deadtrigger/licenses/NXExtract-MIT.txt",
+      "sha256": "74d7d9d40e27fbfe23cb462f9608fa07cbe53ffb0b88a0da9e85dda240c2c788"
+    },
+    {
+      "kind": "payload",
+      "mode": "0644",
+      "path": "deadtrigger/nxextract-version.txt",
+      "sha256": "24ee9a7c3f775326bb14c39083745d29f873f21319f1207c06e1f6e9552a720d"
+    },
+    {
+      "kind": "nxextract-runtime-env",
+      "mode": "0644",
+      "path": "deadtrigger/nxextract/nxextract-runtime-env.sh",
+      "sha256": "332919a9960d4317563b647f9932d1a4367da147a425fe2f78eafd706f01563f"
+    },
+    {
+      "kind": "third-party-linux",
+      "mode": "0755",
+      "path": "deadtrigger/nxextract/nxextract-ui",
+      "sha256": "046afb583f5a211c946495e639409f81d9cfec706788eeccb7924b0e8e5a50b6"
+    },
+    {
+      "kind": "nxextract",
+      "mode": "0644",
+      "path": "deadtrigger/nxextract/nxextract.py",
+      "sha256": "a4a8e5d3bf2a1344491e27921c54430ee9b4e3fedd0160631da96734fa3d5170"
+    },
+    {
+      "kind": "nxextract-runner",
+      "mode": "0644",
+      "path": "deadtrigger/nxextract/run-extractor.sh",
+      "sha256": "179b72f02b9dfdf3ed1bdc382d074fb4ef07f83e3d62cfccfc74a950e68679c2"
+    },
+    {
+      "kind": "nxbootstrap-config",
+      "mode": "0644",
+      "path": "deadtrigger/nxport.json",
+      "sha256": "3e8132eb25c638f87c725f0282249e3aa96248d460ace18744ced128af02f8e9"
+    },
+    {
+      "kind": "portmaster-metadata",
+      "mode": "0644",
+      "path": "deadtrigger/port.json",
+      "sha256": "a18a2905c7e6c7ea626911f48f2924db8133a64d8a7903ccc2b47400dc60cd1f"
+    },
+    {
+      "kind": "payload",
+      "mode": "0644",
+      "path": "deadtrigger/references/adapter-contract-v1.json",
+      "sha256": "bfb9a3ed82b4638d4b41b2cc580fedcb193a1dc9b3ff15cfe4e94b96ea980794"
+    },
+    {
+      "kind": "payload",
+      "mode": "0644",
+      "path": "deadtrigger/references/migration-status-v1.json",
+      "sha256": "0580c702c48cf8a81b4cd846c71042e069055433528e5cc445ec3127612ab3d2"
+    },
+    {
+      "kind": "payload",
+      "mode": "0644",
+      "path": "deadtrigger/version.txt",
+      "sha256": "cc52f678848b814373757b460383bf61960e4943c203735adde0a350b3e50989"
+    }
+  ],
+  "nxextract": {
+    "minimum_version": "1.2.6",
+    "path": "deadtrigger/nxextract/nxextract.py",
+    "recipe_path": "deadtrigger/extractor.json",
+    "recipe_sha256": "03361a5efc93bcc87709bc5fe7aa3dbb1f855e74c4cccb2f5e534dd7c668ee79",
+    "runner_path": "deadtrigger/nxextract/run-extractor.sh",
+    "runner_sha256": "179b72f02b9dfdf3ed1bdc382d074fb4ef07f83e3d62cfccfc74a950e68679c2",
+    "runtime_env_path": "deadtrigger/nxextract/nxextract-runtime-env.sh",
+    "runtime_env_sha256": "332919a9960d4317563b647f9932d1a4367da147a425fe2f78eafd706f01563f",
+    "sha256": "a4a8e5d3bf2a1344491e27921c54430ee9b4e3fedd0160631da96734fa3d5170",
+    "version": "1.2.6"
+  },
+  "package": {
+    "id": "deadtrigger",
+    "launcher": "Dead Trigger.sh",
+    "launcher_chain": [
+      "Dead Trigger.sh"
+    ],
+    "launcher_contract": {
+      "config_path": "deadtrigger/nxport.json",
+      "config_sha256": "3e8132eb25c638f87c725f0282249e3aa96248d460ace18744ced128af02f8e9",
+      "generator": "nxbootstrap",
+      "version": "0.6.5"
+    },
+    "license": {
+      "file": "deadtrigger/LICENSE",
+      "source_url": "https://github.com/NextOs-Ports/nextos_ports_android",
+      "spdx_id": "GPL-3.0-only"
+    },
+    "port_dir": "deadtrigger",
+    "profile": "universal-portmaster",
+    "version": "1.1.1"
+  },
+  "portmaster_metadata": {
+    "gameinfo_xml": null,
+    "images": [],
+    "port_json": {
+      "path": "deadtrigger/port.json",
+      "sha256": "a18a2905c7e6c7ea626911f48f2924db8133a64d8a7903ccc2b47400dc60cd1f"
+    }
+  },
+  "schema_version": 2,
+  "tool": {
+    "name": "nxrelease",
+    "version": "0.2.5"
+  }
+}

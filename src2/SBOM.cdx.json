@@ -1,0 +1,602 @@
+{
+  "bomFormat": "CycloneDX",
+  "components": [
+    {
+      "bom-ref": "file:Dead Trigger.sh",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "2b38e7cd0c263756638b0b5bda36b762bb7009e867984a86de350cc589f2fa8e"
+        }
+      ],
+      "name": "Dead Trigger.sh",
+      "properties": [
+        {
+          "name": "nxrelease:path",
+          "value": "Dead Trigger.sh"
+        },
+        {
+          "name": "nxrelease:kind",
+          "value": "launcher"
+        },
+        {
+          "name": "nxrelease:mode",
+          "value": "0755"
+        }
+      ],
+      "type": "application"
+    },
+    {
+      "bom-ref": "file:deadtrigger/DATA-NOTICE.txt",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "b94525099f4d7e029e43df931940c065718ef6ea1ea04ebd76f47305f70a295e"
+        }
+      ],
+      "name": "DATA-NOTICE.txt",
+      "properties": [
+        {
+          "name": "nxrelease:path",
+          "value": "deadtrigger/DATA-NOTICE.txt"
+        },
+        {
+          "name": "nxrelease:kind",
+          "value": "license-notice"
+        },
+        {
+          "name": "nxrelease:mode",
+          "value": "0644"
+        }
+      ],
+      "type": "file"
+    },
+    {
+      "bom-ref": "file:deadtrigger/INSTALLATION.md",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "aadfdbaa93f98af68122a30dfd405e24b09909a061cc9ebf0ca92a5812a1787c"
+        }
+      ],
+      "name": "INSTALLATION.md",
+      "properties": [
+        {
+          "name": "nxrelease:path",
+          "value": "deadtrigger/INSTALLATION.md"
+        },
+        {
+          "name": "nxrelease:kind",
+          "value": "payload"
+        },
+        {
+          "name": "nxrelease:mode",
+          "value": "0644"
+        }
+      ],
+      "type": "file"
+    },
+    {
+      "bom-ref": "file:deadtrigger/LICENSE",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "fd48a1afc565e3b27d07ca190012389f5c0f377abd7285e779c75c58540171ce"
+        }
+      ],
+      "name": "LICENSE",
+      "properties": [
+        {
+          "name": "nxrelease:path",
+          "value": "deadtrigger/LICENSE"
+        },
+        {
+          "name": "nxrelease:kind",
+          "value": "license-notice"
+        },
+        {
+          "name": "nxrelease:mode",
+          "value": "0644"
+        }
+      ],
+      "type": "file"
+    },
+    {
+      "bom-ref": "file:deadtrigger/NOTICE.md",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "5722117b89cbede7ce30c83d464f5a2960a50f7a7624551ef8f95b681f91377f"
+        }
+      ],
+      "name": "NOTICE.md",
+      "properties": [
+        {
+          "name": "nxrelease:path",
+          "value": "deadtrigger/NOTICE.md"
+        },
+        {
+          "name": "nxrelease:kind",
+          "value": "license-notice"
+        },
+        {
+          "name": "nxrelease:mode",
+          "value": "0644"
+        }
+      ],
+      "type": "file"
+    },
+    {
+      "bom-ref": "file:deadtrigger/README.md",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "4a9b22897ab01bead4765d1c05e543a4b1bf0d67505cc6acc606f7b886b9291e"
+        }
+      ],
+      "name": "README.md",
+      "properties": [
+        {
+          "name": "nxrelease:path",
+          "value": "deadtrigger/README.md"
+        },
+        {
+          "name": "nxrelease:kind",
+          "value": "payload"
+        },
+        {
+          "name": "nxrelease:mode",
+          "value": "0644"
+        }
+      ],
+      "type": "file"
+    },
+    {
+      "bom-ref": "file:deadtrigger/deadtrigger-nextos",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "d43d1fbcceb365d6c575316d84cbed85a9dd2e68bec0356b91c383dbf7f8146d"
+        }
+      ],
+      "name": "deadtrigger-nextos",
+      "properties": [
+        {
+          "name": "nxrelease:path",
+          "value": "deadtrigger/deadtrigger-nextos"
+        },
+        {
+          "name": "nxrelease:kind",
+          "value": "project-linux"
+        },
+        {
+          "name": "nxrelease:mode",
+          "value": "0755"
+        },
+        {
+          "name": "nxrelease:architecture",
+          "value": "aarch64"
+        },
+        {
+          "name": "nxrelease:build_profile",
+          "value": "universal-low-glibc"
+        },
+        {
+          "name": "nxrelease:glibc_max",
+          "value": "2.17"
+        },
+        {
+          "name": "nxrelease:interpreter",
+          "value": "/lib/ld-linux-aarch64.so.1"
+        },
+        {
+          "name": "nxrelease:soname",
+          "value": ""
+        },
+        {
+          "name": "nxrelease:provenance",
+          "value": "build_universal.sh; pinned AArch64 GCC 16.1.0 objects with Buster libc headers; pinned offline Debian Buster image sha256:036c7910ea53bc78cc213452afa92fa83d55de1c51ae54f315af58b5a41a45cf for link and strip"
+        }
+      ],
+      "purl": "pkg:generic/deadtrigger-nextos@1.1.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "file:deadtrigger/extractor.json",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "03361a5efc93bcc87709bc5fe7aa3dbb1f855e74c4cccb2f5e534dd7c668ee79"
+        }
+      ],
+      "name": "extractor.json",
+      "properties": [
+        {
+          "name": "nxrelease:path",
+          "value": "deadtrigger/extractor.json"
+        },
+        {
+          "name": "nxrelease:kind",
+          "value": "nxextract-recipe"
+        },
+        {
+          "name": "nxrelease:mode",
+          "value": "0644"
+        }
+      ],
+      "type": "file"
+    },
+    {
+      "bom-ref": "file:deadtrigger/gamedata/README.txt",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "be905dd76ce2de37664c80c5d426c2f3fef4f52f345ca247d0e1b72050cd07f8"
+        }
+      ],
+      "name": "README.txt",
+      "properties": [
+        {
+          "name": "nxrelease:path",
+          "value": "deadtrigger/gamedata/README.txt"
+        },
+        {
+          "name": "nxrelease:kind",
+          "value": "payload"
+        },
+        {
+          "name": "nxrelease:mode",
+          "value": "0644"
+        }
+      ],
+      "type": "file"
+    },
+    {
+      "bom-ref": "file:deadtrigger/licenses/NXExtract-MIT.txt",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "74d7d9d40e27fbfe23cb462f9608fa07cbe53ffb0b88a0da9e85dda240c2c788"
+        }
+      ],
+      "name": "NXExtract-MIT.txt",
+      "properties": [
+        {
+          "name": "nxrelease:path",
+          "value": "deadtrigger/licenses/NXExtract-MIT.txt"
+        },
+        {
+          "name": "nxrelease:kind",
+          "value": "license-notice"
+        },
+        {
+          "name": "nxrelease:mode",
+          "value": "0644"
+        }
+      ],
+      "type": "file"
+    },
+    {
+      "bom-ref": "file:deadtrigger/nxextract-version.txt",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "24ee9a7c3f775326bb14c39083745d29f873f21319f1207c06e1f6e9552a720d"
+        }
+      ],
+      "name": "nxextract-version.txt",
+      "properties": [
+        {
+          "name": "nxrelease:path",
+          "value": "deadtrigger/nxextract-version.txt"
+        },
+        {
+          "name": "nxrelease:kind",
+          "value": "payload"
+        },
+        {
+          "name": "nxrelease:mode",
+          "value": "0644"
+        }
+      ],
+      "type": "file"
+    },
+    {
+      "bom-ref": "file:deadtrigger/nxextract/nxextract-runtime-env.sh",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "332919a9960d4317563b647f9932d1a4367da147a425fe2f78eafd706f01563f"
+        }
+      ],
+      "name": "nxextract-runtime-env.sh",
+      "properties": [
+        {
+          "name": "nxrelease:path",
+          "value": "deadtrigger/nxextract/nxextract-runtime-env.sh"
+        },
+        {
+          "name": "nxrelease:kind",
+          "value": "nxextract-runtime-env"
+        },
+        {
+          "name": "nxrelease:mode",
+          "value": "0644"
+        }
+      ],
+      "type": "file"
+    },
+    {
+      "bom-ref": "file:deadtrigger/nxextract/nxextract-ui",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "046afb583f5a211c946495e639409f81d9cfec706788eeccb7924b0e8e5a50b6"
+        }
+      ],
+      "name": "nxextract-ui",
+      "properties": [
+        {
+          "name": "nxrelease:path",
+          "value": "deadtrigger/nxextract/nxextract-ui"
+        },
+        {
+          "name": "nxrelease:kind",
+          "value": "third-party-linux"
+        },
+        {
+          "name": "nxrelease:mode",
+          "value": "0755"
+        },
+        {
+          "name": "nxrelease:architecture",
+          "value": "aarch64"
+        },
+        {
+          "name": "nxrelease:build_profile",
+          "value": "universal-low-glibc"
+        },
+        {
+          "name": "nxrelease:glibc_max",
+          "value": "2.17"
+        },
+        {
+          "name": "nxrelease:interpreter",
+          "value": "/lib/ld-linux-aarch64.so.1"
+        },
+        {
+          "name": "nxrelease:soname",
+          "value": ""
+        },
+        {
+          "name": "nxrelease:provenance",
+          "value": "unmodified canonical NXExtract 1.2.6 UI; MIT; content-pinned AArch64 GLIBC_2.17 build"
+        }
+      ],
+      "purl": "pkg:generic/nxextract-ui@1.1.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "file:deadtrigger/nxextract/nxextract.py",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "a4a8e5d3bf2a1344491e27921c54430ee9b4e3fedd0160631da96734fa3d5170"
+        }
+      ],
+      "name": "nxextract.py",
+      "properties": [
+        {
+          "name": "nxrelease:path",
+          "value": "deadtrigger/nxextract/nxextract.py"
+        },
+        {
+          "name": "nxrelease:kind",
+          "value": "nxextract"
+        },
+        {
+          "name": "nxrelease:mode",
+          "value": "0644"
+        }
+      ],
+      "type": "file"
+    },
+    {
+      "bom-ref": "file:deadtrigger/nxextract/run-extractor.sh",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "179b72f02b9dfdf3ed1bdc382d074fb4ef07f83e3d62cfccfc74a950e68679c2"
+        }
+      ],
+      "name": "run-extractor.sh",
+      "properties": [
+        {
+          "name": "nxrelease:path",
+          "value": "deadtrigger/nxextract/run-extractor.sh"
+        },
+        {
+          "name": "nxrelease:kind",
+          "value": "nxextract-runner"
+        },
+        {
+          "name": "nxrelease:mode",
+          "value": "0644"
+        }
+      ],
+      "type": "file"
+    },
+    {
+      "bom-ref": "file:deadtrigger/nxport.json",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "3e8132eb25c638f87c725f0282249e3aa96248d460ace18744ced128af02f8e9"
+        }
+      ],
+      "name": "nxport.json",
+      "properties": [
+        {
+          "name": "nxrelease:path",
+          "value": "deadtrigger/nxport.json"
+        },
+        {
+          "name": "nxrelease:kind",
+          "value": "nxbootstrap-config"
+        },
+        {
+          "name": "nxrelease:mode",
+          "value": "0644"
+        }
+      ],
+      "type": "file"
+    },
+    {
+      "bom-ref": "file:deadtrigger/port.json",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "a18a2905c7e6c7ea626911f48f2924db8133a64d8a7903ccc2b47400dc60cd1f"
+        }
+      ],
+      "name": "port.json",
+      "properties": [
+        {
+          "name": "nxrelease:path",
+          "value": "deadtrigger/port.json"
+        },
+        {
+          "name": "nxrelease:kind",
+          "value": "portmaster-metadata"
+        },
+        {
+          "name": "nxrelease:mode",
+          "value": "0644"
+        }
+      ],
+      "type": "file"
+    },
+    {
+      "bom-ref": "file:deadtrigger/references/adapter-contract-v1.json",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "bfb9a3ed82b4638d4b41b2cc580fedcb193a1dc9b3ff15cfe4e94b96ea980794"
+        }
+      ],
+      "name": "adapter-contract-v1.json",
+      "properties": [
+        {
+          "name": "nxrelease:path",
+          "value": "deadtrigger/references/adapter-contract-v1.json"
+        },
+        {
+          "name": "nxrelease:kind",
+          "value": "payload"
+        },
+        {
+          "name": "nxrelease:mode",
+          "value": "0644"
+        }
+      ],
+      "type": "file"
+    },
+    {
+      "bom-ref": "file:deadtrigger/references/migration-status-v1.json",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "0580c702c48cf8a81b4cd846c71042e069055433528e5cc445ec3127612ab3d2"
+        }
+      ],
+      "name": "migration-status-v1.json",
+      "properties": [
+        {
+          "name": "nxrelease:path",
+          "value": "deadtrigger/references/migration-status-v1.json"
+        },
+        {
+          "name": "nxrelease:kind",
+          "value": "payload"
+        },
+        {
+          "name": "nxrelease:mode",
+          "value": "0644"
+        }
+      ],
+      "type": "file"
+    },
+    {
+      "bom-ref": "file:deadtrigger/version.txt",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "cc52f678848b814373757b460383bf61960e4943c203735adde0a350b3e50989"
+        }
+      ],
+      "name": "version.txt",
+      "properties": [
+        {
+          "name": "nxrelease:path",
+          "value": "deadtrigger/version.txt"
+        },
+        {
+          "name": "nxrelease:kind",
+          "value": "payload"
+        },
+        {
+          "name": "nxrelease:mode",
+          "value": "0644"
+        }
+      ],
+      "type": "file"
+    }
+  ],
+  "dependencies": [
+    {
+      "dependsOn": [
+        "file:Dead Trigger.sh",
+        "file:deadtrigger/DATA-NOTICE.txt",
+        "file:deadtrigger/INSTALLATION.md",
+        "file:deadtrigger/LICENSE",
+        "file:deadtrigger/NOTICE.md",
+        "file:deadtrigger/README.md",
+        "file:deadtrigger/deadtrigger-nextos",
+        "file:deadtrigger/extractor.json",
+        "file:deadtrigger/gamedata/README.txt",
+        "file:deadtrigger/licenses/NXExtract-MIT.txt",
+        "file:deadtrigger/nxextract-version.txt",
+        "file:deadtrigger/nxextract/nxextract-runtime-env.sh",
+        "file:deadtrigger/nxextract/nxextract-ui",
+        "file:deadtrigger/nxextract/nxextract.py",
+        "file:deadtrigger/nxextract/run-extractor.sh",
+        "file:deadtrigger/nxport.json",
+        "file:deadtrigger/port.json",
+        "file:deadtrigger/references/adapter-contract-v1.json",
+        "file:deadtrigger/references/migration-status-v1.json",
+        "file:deadtrigger/version.txt"
+      ],
+      "ref": "pkg:portmaster/deadtrigger@1.1.1"
+    }
+  ],
+  "metadata": {
+    "component": {
+      "bom-ref": "pkg:portmaster/deadtrigger@1.1.1",
+      "name": "deadtrigger",
+      "purl": "pkg:portmaster/deadtrigger@1.1.1",
+      "type": "application",
+      "version": "1.1.1"
+    },
+    "timestamp": "2026-08-11T00:00:00Z",
+    "tools": [
+      {
+        "name": "nxrelease",
+        "vendor": "NextOS",
+        "version": "0.2.5"
+      }
+    ]
+  },
+  "serialNumber": "urn:uuid:4b69c0b3-ca85-53f4-b17d-b30c4abfc8fc",
+  "specVersion": "1.5",
+  "version": 1
+}
