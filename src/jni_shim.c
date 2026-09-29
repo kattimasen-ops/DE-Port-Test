@@ -11,6 +11,10 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
+/* jchar ist in <jni.h> als uint16_t definiert. Wir binden <jni.h>
+ * nicht ein, also definieren wir es lokal. */
+typedef uint16_t jchar;
+
 static EGLDisplay g_dpy  = EGL_NO_DISPLAY;
 static EGLSurface g_surf = EGL_NO_SURFACE;
 static EGLContext g_ctx  = EGL_NO_CONTEXT;
@@ -51,7 +55,7 @@ typedef struct { void *functions; } jni_env_t;
 static uintptr_t     g_env_table[JNI_TABLE_SIZE];
 static jni_env_t     g_env_singleton;
 
-/* FIX: Groessere Puffer fuer Fake-Objekte.
+/* Groessere Puffer fuer Fake-Objekte.
  * Unity liest ueber diese Zeiger hinaus, ein int (4 Byte) ist zu klein. */
 static uint8_t g_fake_class_storage[64] = {0};
 static uint8_t g_fake_mid_storage[64]   = {0};
@@ -145,6 +149,19 @@ static void *jni_env_NewStringUTF(void *env, const char *utf) {
     LOGI("JNI NewStringUTF(%s)", utf ? utf : "(null)");
     return (void *)utf;
 }
+
+/* NewString: UTF-16 -> UTF-8. jchar ist hier uint16_t. */
+static void *jni_env_NewString(void *env, const jchar *unicode, int len) {
+    (void)env;
+    if (!unicode || len <= 0) return (void *)"";
+    char *out = malloc((size_t)len + 1);
+    if (!out) return NULL;
+    for (int i = 0; i < len; i++) out[i] = (char)(unicode[i] & 0xFF);
+    out[len] = 0;
+    LOGI("JNI NewString(%d) -> %s", len, out);
+    return out;
+}
+
 static const char *jni_env_GetStringUTFChars(void *env, void *jstr, unsigned char *isCopy) {
     (void)env;
     if (isCopy) *isCopy = 0;
@@ -193,18 +210,6 @@ static void *jni_env_NewByteArray(void *env, int len) {
     return g_fake_obj_storage;
 }
 static int jni_env_GetArrayLength(void *env, void *arr) { (void)env; (void)arr; return 0; }
-
-/* FIX: NewString korrekt implementieren (UTF-16 -> UTF-8) */
-static void *jni_env_NewString(void *env, const jchar *unicode, int len) {
-    (void)env;
-    if (!unicode || len <= 0) return (void *)"";
-    char *out = malloc(len + 1);
-    if (!out) return NULL;
-    for (int i = 0; i < len; i++) out[i] = (char)(unicode[i] & 0xFF);
-    out[len] = 0;
-    LOGI("JNI NewString(%d) -> %s", len, out);
-    return out;
-}
 
 #define ENV_GetVersion              4
 #define ENV_FindClass               6
