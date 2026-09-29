@@ -15,18 +15,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # --- Frida-Installation (für Laufzeit-Analyse auf dem Gerät) ---
-      - name: Install Frida Tools
-        continue-on-error: true
-        run: |
-          apt-get update && apt-get install -y --no-install-recommends \
-            python3-pip python3-venv nodejs npm
-          pip3 install frida-tools
-          npm install -g frida-il2cpp-bridge
-          echo "Frida tools installed"
-          frida --version || echo "frida --version failed"
-          npx frida-il2cpp-bridge --help || echo "frida-il2cpp-bridge help failed"
-
       - name: Run build.sh
         shell: bash
         continue-on-error: true
