@@ -26,14 +26,41 @@
 #endif
 
 /* ============================================================
- * Crash-Handler
+ * RAW-Logging (unbuffered, direkt via write(2))
  *
- * - Fester, statisch allokierter Stack (sigaltstack), damit wir
- *   nicht vom bereits korrupten Thread-Stack abhaengig sind.
- * - Der Build setzt -fno-stack-protector global, damit der
- *   Canary-Check im Handler keinen zweiten SIGSEGV ausloest.
- *   (GCC 9 aarch64 ignoriert __attribute__((no_stack_protector)))
- * - Nur write() und statische Buffer, kein malloc/fprintf.
+ * fprintf(stderr) ist gepuffert — bei SIGSEGV verlieren wir
+ * sonst alle Ausgaben. rawlog() schreibt sofort.
+ * ============================================================ */
+__attribute__((noinline))
+static void rawlog(const char *s) {
+    size_t n = 0;
+    while (s[n]) n++;
+    if (n) {
+        ssize_t r = write(2, s, n);
+        (void)r;
+    }
+}
+
+__attribute__((noinline))
+static void rawlog_hex(uint64_t v) {
+    char buf[24];
+    const char *hx = "0123456789abcdef";
+    int n = 0;
+    buf[n++] = '0'; buf[n++] = 'x';
+    int started = 0;
+    for (int i = 15; i >= 0; i--) {
+        int nib = (v >> (i*4)) & 0xF;
+        if (nib || started || i == 0) {
+            buf[n++] = hx[nib];
+            started = 1;
+        }
+    }
+    buf[n] = 0;
+    write(2, buf, n);
+}
+
+/* ============================================================
+ * Crash-Handler
  * ============================================================ */
 
 __attribute__((noinline))
@@ -43,9 +70,9 @@ static int fmt_hex(uint64_t v, char *out) {
     out[n++] = '0'; out[n++] = 'x';
     int started = 0;
     for (int i = 15; i >= 0; i--) {
-        int nibble = (v >> (i*4)) & 0xF;
-        if (nibble || started || i == 0) {
-            out[n++] = hx[nibble];
+        int nib = (v >> (i*4)) & 0xF;
+        if (nib || started || i == 0) {
+            out[n++] = hx[nib];
             started = 1;
         }
     }
@@ -76,12 +103,69 @@ static void safe_write(const char *s) {
     (void)r;
 }
 
+/* FP-Chain-Backtrace — funktioniert nur mit -fno-omit-frame-pointer.
+ * ARM64-Konvention: fp zeigt auf ein Paar [prev_fp, saved_lr]. */
+__attribute__((noinline))
+static void dump_fp_chain(uint64_t fp, uint64_t pc, uint64_t lr) {
+    char buf[128];
+    int n;
+    int valid = 0;
+    safe_write("\n### BACKTRACE (FP chain) ###\n");
+    for (int i = 0; i < 20; i++) {
+        n = 0;
+        buf[n++] = ' ';
+        buf[n++] = '#';
+        if (i >= 10) buf[n++] = '0' + (i/10);
+        buf[n++] = '0' + (i%10);
+        buf[n++] = ' ';
+
+        if (i == 0) {
+            const char *p = "PC=";
+            while (*p) buf[n++] = *p++;
+            fmt_hex(pc, buf + n);
+            while (buf[n]) n++;
+            p = " LR=";
+            while (*p) buf[n++] = *p++;
+            fmt_hex(lr, buf + n);
+            while (buf[n]) n++;
+            p = " FP=";
+            while (*p) buf[n++] = *p++;
+            fmt_hex(fp, buf + n);
+            while (buf[n]) n++;
+        } else if (fp && fp >= 0x1000 && (fp & 7) == 0) {
+            /* Vermeide Zugriff auf unmapped Memory. */
+            uint64_t next_fp = 0, ret_lr = 0;
+            volatile uint64_t *q = (volatile uint64_t *)fp;
+            next_fp = q[0];
+            ret_lr  = q[1];
+            const char *p = "LR=";
+            while (*p) buf[n++] = *p++;
+            fmt_hex(ret_lr, buf + n);
+            while (buf[n]) n++;
+            p = " FP=";
+            while (*p) buf[n++] = *p++;
+            fmt_hex(next_fp, buf + n);
+            while (buf[n]) n++;
+            valid++;
+            if (next_fp <= fp || (next_fp & 7) != 0) fp = 0;
+            else fp = next_fp;
+        } else {
+            break;
+        }
+        buf[n++] = '\n';
+        buf[n] = 0;
+        safe_write(buf);
+    }
+    (void)valid;
+    safe_write("### END BACKTRACE ###\n");
+}
+
 __attribute__((noinline))
 static void crash_handler(int sig, siginfo_t *info, void *uctx) {
     ucontext_t *uc = (ucontext_t *)uctx;
     char hexbuf[24];
     char decbuf[16];
-    char line[256];
+    char line[512];
     int n = 0;
 
     const char *hdr = "\n### SIGNAL ";
@@ -90,25 +174,47 @@ static void crash_handler(int sig, siginfo_t *info, void *uctx) {
     fmt_dec(sig, decbuf);
     for (int i = 0; decbuf[i]; i++) line[n++] = decbuf[i];
 
-    const char *p1 = " PC=";
-    while (*p1) line[n++] = *p1++;
-    fmt_hex((uint64_t)uc->uc_mcontext.pc, hexbuf);
-    for (int i = 0; hexbuf[i]; i++) line[n++] = hexbuf[i];
+    uint64_t pc  = (uint64_t)uc->uc_mcontext.pc;
+    uint64_t sp  = (uint64_t)uc->uc_mcontext.sp;
+    uint64_t fp  = (uint64_t)uc->uc_mcontext.regs[29];
+    uint64_t lr  = (uint64_t)uc->uc_mcontext.regs[30];
+    uint64_t addr = (uint64_t)(info ? info->si_addr : 0);
 
-    const char *p2 = " SP=";
-    while (*p2) line[n++] = *p2++;
-    fmt_hex((uint64_t)uc->uc_mcontext.sp, hexbuf);
+    const char *p;
+    p = " PC="; while (*p) line[n++] = *p++; fmt_hex(pc, hexbuf);
     for (int i = 0; hexbuf[i]; i++) line[n++] = hexbuf[i];
-
-    const char *p3 = " ADDR=";
-    while (*p3) line[n++] = *p3++;
-    fmt_hex((uint64_t)(info ? info->si_addr : 0), hexbuf);
+    p = " SP="; while (*p) line[n++] = *p++; fmt_hex(sp, hexbuf);
     for (int i = 0; hexbuf[i]; i++) line[n++] = hexbuf[i];
-
-    const char *tail = " ###\n";
-    while (*tail) line[n++] = *tail++;
+    p = " FP="; while (*p) line[n++] = *p++; fmt_hex(fp, hexbuf);
+    for (int i = 0; hexbuf[i]; i++) line[n++] = hexbuf[i];
+    p = " LR="; while (*p) line[n++] = *p++; fmt_hex(lr, hexbuf);
+    for (int i = 0; hexbuf[i]; i++) line[n++] = hexbuf[i];
+    p = " ADDR="; while (*p) line[n++] = *p++; fmt_hex(addr, hexbuf);
+    for (int i = 0; hexbuf[i]; i++) line[n++] = hexbuf[i];
+    p = " ###\n"; while (*p) line[n++] = *p++;
     line[n] = 0;
     safe_write(line);
+
+    /* zus. Register x0-x3 für Fehleranalyse */
+    n = 0;
+    const char *pr = "### REGS x0=";
+    while (*pr) line[n++] = *pr++;
+    fmt_hex((uint64_t)uc->uc_mcontext.regs[0], hexbuf);
+    for (int i = 0; hexbuf[i]; i++) line[n++] = hexbuf[i];
+    pr = " x1="; while (*pr) line[n++] = *pr++;
+    fmt_hex((uint64_t)uc->uc_mcontext.regs[1], hexbuf);
+    for (int i = 0; hexbuf[i]; i++) line[n++] = hexbuf[i];
+    pr = " x2="; while (*pr) line[n++] = *pr++;
+    fmt_hex((uint64_t)uc->uc_mcontext.regs[2], hexbuf);
+    for (int i = 0; hexbuf[i]; i++) line[n++] = hexbuf[i];
+    pr = " x3="; while (*pr) line[n++] = *pr++;
+    fmt_hex((uint64_t)uc->uc_mcontext.regs[3], hexbuf);
+    for (int i = 0; hexbuf[i]; i++) line[n++] = hexbuf[i];
+    pr = " ###\n"; while (*pr) line[n++] = *pr++;
+    line[n] = 0;
+    safe_write(line);
+
+    dump_fp_chain(fp, pc, lr);
 
     _exit(128 + sig);
 }
@@ -161,9 +267,6 @@ static EGLDisplay    egl_dpy = EGL_NO_DISPLAY;
 static EGLSurface    egl_surf = EGL_NO_SURFACE;
 static EGLContext    egl_ctx  = EGL_NO_CONTEXT;
 
-/* ============================================================
- * Heap-Sanity
- * ============================================================ */
 static int heap_is_sane(const char *when) {
     void *a = malloc(16);
     if (!a) { LOGE("  Heap-Check(%s): malloc(16) fehlgeschlagen", when); return 0; }
@@ -179,9 +282,6 @@ static int heap_is_sane(const char *when) {
     return 1;
 }
 
-/* ============================================================
- * SDL/EGL-Setup
- * ============================================================ */
 static int video_init(void) {
     if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) < 0) {
         LOGE("SDL_InitSubSystem: %s", SDL_GetError());
@@ -220,9 +320,6 @@ static int video_init(void) {
     return 0;
 }
 
-/* ============================================================
- * Modul-Laden
- * ============================================================ */
 static void try_call_onload(const char *libname, void *handle) {
     JNI_OnLoad_t fn = (JNI_OnLoad_t) so_find_addr(handle, "JNI_OnLoad");
     if (!fn) {
@@ -248,31 +345,24 @@ static void preload_libcxx(void) {
     LOGI("[INFO] externe libc++_shared.so nicht geladen");
 }
 
-/* ============================================================
- * Init-Reihenfolge (an DT angelehnt):
- *
- *  1. libmain.so laden
- *  2. JNI_OnLoad(libmain)
- *  3. NativeLoader.load(libdir) -> lädt libunity, libil2cpp, initJni
- *  4. UnityMain-Native suchen
- * ============================================================ */
 static int load_module_chain(void) {
     char path[512];
 
+    rawlog("[boot] load_module_chain: vor heap_is_sane\n");
     if (!heap_is_sane("vor libmain")) return -1;
 
     snprintf(path, sizeof(path), "%s/libmain.so", DEAD_EFFECT_LIBDIR);
+    rawlog("[boot] lade libmain.so\n");
     LOGI("Lade %s", path);
     g_libmain_handle = so_load(path);
     if (!g_libmain_handle) { LOGE("libmain.so laden fehlgeschlagen"); return -1; }
+    rawlog("[boot] libmain.so geladen\n");
     LOGI("libmain.so geladen: %p", g_libmain_handle);
     if (!heap_is_sane("nach libmain")) return -1;
 
     try_call_onload("libmain", g_libmain_handle);
 
-    /* NativeLoader.load triggert in libmain.so das Laden von
-     * libunity.so, libil2cpp.so (per dlopen-Hook) und ruft
-     * intern UnityPlayer.initJni auf. */
+    rawlog("[boot] rufe NativeLoader.load\n");
     LOGI("Rufe NativeLoader.load(%s)", DEAD_EFFECT_LIBDIR);
     int rc = jni_call_native_loader(
         "com/unity3d/player/NativeLoader", "load", DEAD_EFFECT_LIBDIR);
@@ -281,8 +371,8 @@ static int load_module_chain(void) {
         return -1;
     }
     LOGI("NativeLoader.load OK");
+    rawlog("[boot] NativeLoader.load OK\n");
 
-    /* UnityMain-Native aus der JNI-Registry holen. */
     const char *UP = "com/unity3d/player/UnityPlayer";
     unity_main_fn      = (UnityMain_t)   jni_find_native(UP, "UnityMain");
     unity_native_pause = (nativePause_t) jni_find_native(UP, "nativePause");
@@ -299,9 +389,6 @@ static int load_module_chain(void) {
     return 0;
 }
 
-/* ============================================================
- * UnityMain-Thread: blockiert bis Spiel beendet.
- * ============================================================ */
 static volatile int g_unity_running = 0;
 
 static void *unity_main_thread(void *arg) {
@@ -318,22 +405,44 @@ static void *unity_main_thread(void *arg) {
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
+    rawlog("[boot] main() entered\n");
+
     install_crash_handler();
+    rawlog("[boot] crash handler installed\n");
+
+    rawlog("[boot] libdir=");
+    rawlog(DEAD_EFFECT_LIBDIR);
+    rawlog(" assets=");
+    rawlog(DEAD_EFFECT_ASSETS);
+    rawlog("\n");
 
     LOGI("Dead Effect Loader startet");
     LOGI("  libdir = %s", DEAD_EFFECT_LIBDIR);
     LOGI("  assets = %s", DEAD_EFFECT_ASSETS);
+    rawlog("[boot] after LOGI x3\n");
 
     jni_shim_init();
-    preload_libcxx();
+    rawlog("[boot] jni_shim_init done\n");
 
-    if (video_init() != 0) return 1;
-    if (load_module_chain() != 0) return 1;
+    preload_libcxx();
+    rawlog("[boot] preload_libcxx done\n");
+
+    rawlog("[boot] video_init...\n");
+    if (video_init() != 0) {
+        rawlog("[boot] video_init failed\n");
+        return 1;
+    }
+    rawlog("[boot] video_init done\n");
+
+    rawlog("[boot] load_module_chain...\n");
+    if (load_module_chain() != 0) {
+        rawlog("[boot] load_module_chain failed\n");
+        return 1;
+    }
+    rawlog("[boot] load_module_chain done\n");
 
     jni_shim_set_egl(egl_dpy, egl_surf, egl_ctx);
 
-    /* UnityMain im eigenen Thread starten.
-     * Der Main-Thread kümmert sich um SDL-Input und Quit. */
     pthread_t t;
     if (pthread_create(&t, NULL, unity_main_thread, NULL) != 0) {
         LOGE("pthread_create für UnityMain fehlgeschlagen");
