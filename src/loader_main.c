@@ -5,6 +5,7 @@
 #include <dlfcn.h>
 #include <signal.h>
 #include <ucontext.h>
+#include <pthread.h>
 #include <SDL2/SDL.h>
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
@@ -17,14 +18,24 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
+#ifndef DEAD_EFFECT_LIBDIR
+#define DEAD_EFFECT_LIBDIR "/roms/ports/DeadEffect/lib"
+#endif
+#ifndef DEAD_EFFECT_ASSETS
+#define DEAD_EFFECT_ASSETS "/roms/ports/DeadEffect/assets"
+#endif
+
 /* ============================================================
- * Robust Crash-Handler
- * Kein malloc/fprintf/backtrace_symbols — die wuerden bei einem
- * korrupten Heap selbst crashen. Nur write() und ein statischer
- * Buffer. PC/SP/Fault-Addr kommen direkt aus dem Signal-Kontext.
+ * Crash-Handler
+ *
+ * - Fester, statisch allokierter Stack (sigaltstack), damit wir
+ *   nicht vom bereits korrupten Thread-Stack abhaengig sind.
+ * - no_stack_protector: verhindert, dass der Canary-Check
+ *   im Handler selbst einen zweiten SIGSEGV ausloest.
+ * - Nur write() und statische Buffer, kein malloc/fprintf.
  * ============================================================ */
 
-/* Sehr primitives Hex-Format (kein malloc). */
+__attribute__((no_stack_protector, noinline))
 static int fmt_hex(uint64_t v, char *out) {
     const char *hx = "0123456789abcdef";
     int n = 0;
@@ -41,6 +52,7 @@ static int fmt_hex(uint64_t v, char *out) {
     return n;
 }
 
+__attribute__((no_stack_protector, noinline))
 static int fmt_dec(int v, char *out) {
     char tmp[16];
     int n = 0;
@@ -55,6 +67,7 @@ static int fmt_dec(int v, char *out) {
     return n;
 }
 
+__attribute__((no_stack_protector, noinline))
 static void safe_write(const char *s) {
     size_t len = 0;
     while (s[len]) len++;
@@ -62,6 +75,7 @@ static void safe_write(const char *s) {
     (void)r;
 }
 
+__attribute__((no_stack_protector, noinline))
 static void crash_handler(int sig, siginfo_t *info, void *uctx) {
     ucontext_t *uc = (ucontext_t *)uctx;
     char hexbuf[24];
@@ -69,7 +83,6 @@ static void crash_handler(int sig, siginfo_t *info, void *uctx) {
     char line[256];
     int n = 0;
 
-    /* Fester Vorspann */
     const char *hdr = "\n### SIGNAL ";
     while (*hdr) line[n++] = *hdr++;
 
@@ -99,11 +112,20 @@ static void crash_handler(int sig, siginfo_t *info, void *uctx) {
     _exit(128 + sig);
 }
 
+static char g_alt_stack[SIGSTKSZ * 4] __attribute__((aligned(16)));
+
 static void install_crash_handler(void) {
+    stack_t ss;
+    memset(&ss, 0, sizeof(ss));
+    ss.ss_sp = g_alt_stack;
+    ss.ss_size = sizeof(g_alt_stack);
+    ss.ss_flags = 0;
+    sigaltstack(&ss, NULL);
+
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = crash_handler;
-    sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+    sa.sa_flags = SA_SIGINFO | SA_RESETHAND | SA_ONSTACK;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, NULL);
     sigaction(SIGBUS,  &sa, NULL);
@@ -112,32 +134,25 @@ static void install_crash_handler(void) {
     sigaction(SIGABRT, &sa, NULL);
 }
 
-/* abort() ueberschreiben: kein glibc-Backtrace, nur PC. */
 void abort(void) {
     safe_write("\n### ABORT() AUFGERUFEN ###\n");
     _exit(134);
 }
 
-#ifndef DEAD_EFFECT_LIBDIR
-#define DEAD_EFFECT_LIBDIR "/roms/ports/DeadEffect/lib"
-#endif
-#ifndef DEAD_EFFECT_ASSETS
-#define DEAD_EFFECT_ASSETS "/roms/ports/DeadEffect/assets"
-#endif
-
+/* ============================================================
+ * Globaler State
+ * ============================================================ */
 ANativeWindow *g_android_window = NULL;
 void *g_libmain_handle  = NULL;
 void *g_libunity_handle = NULL;
 void *g_libil2cpp_handle = NULL;
 
 typedef int  (*JNI_OnLoad_t)(void *vm, void *reserved);
-typedef void (*initJni_t)(void *, void *, void *);
-typedef unsigned char (*nativeRender_t)(void *, void *, long long, int, int);
+typedef void (*UnityMain_t)(void *env, void *thiz);
 typedef void (*nativePause_t)(void *, void *);
 
-static initJni_t      unity_init_jni      = NULL;
-static nativeRender_t unity_native_render = NULL;
-static nativePause_t  unity_native_pause  = NULL;
+static UnityMain_t   unity_main_fn     = NULL;
+static nativePause_t unity_native_pause = NULL;
 
 static SDL_Window   *sdl_win = NULL;
 static SDL_GLContext sdl_ctx = NULL;
@@ -145,6 +160,9 @@ static EGLDisplay    egl_dpy = EGL_NO_DISPLAY;
 static EGLSurface    egl_surf = EGL_NO_SURFACE;
 static EGLContext    egl_ctx = EGL_NO_CONTEXT;
 
+/* ============================================================
+ * Heap-Sanity
+ * ============================================================ */
 static int heap_is_sane(const char *when) {
     void *a = malloc(16);
     if (!a) { LOGE("  Heap-Check(%s): malloc(16) fehlgeschlagen", when); return 0; }
@@ -160,6 +178,9 @@ static int heap_is_sane(const char *when) {
     return 1;
 }
 
+/* ============================================================
+ * SDL/EGL-Setup
+ * ============================================================ */
 static int video_init(void) {
     if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) < 0) {
         LOGE("SDL_InitSubSystem: %s", SDL_GetError());
@@ -198,6 +219,9 @@ static int video_init(void) {
     return 0;
 }
 
+/* ============================================================
+ * Modul-Laden
+ * ============================================================ */
 static void try_call_onload(const char *libname, void *handle) {
     JNI_OnLoad_t fn = (JNI_OnLoad_t) so_find_addr(handle, "JNI_OnLoad");
     if (!fn) {
@@ -220,10 +244,17 @@ static void preload_libcxx(void) {
     h = dlopen("libc++_shared.so", RTLD_NOW | RTLD_GLOBAL);
     if (h) { LOGI("libc++_shared.so vorgeladen (via Name): %p", h); return; }
 
-    LOGI("[INFO] externe libc++_shared.so nicht geladen — "
-         "Unity-Libs sind statisch gelinkt, nicht benoetigt");
+    LOGI("[INFO] externe libc++_shared.so nicht geladen");
 }
 
+/* ============================================================
+ * Init-Reihenfolge (an DT angelehnt):
+ *
+ *  1. libmain.so laden
+ *  2. JNI_OnLoad(libmain)
+ *  3. NativeLoader.load(libdir) -> lädt libunity, libil2cpp, initJni
+ *  4. UnityMain-Native suchen
+ * ============================================================ */
 static int load_module_chain(void) {
     char path[512];
 
@@ -235,45 +266,54 @@ static int load_module_chain(void) {
     if (!g_libmain_handle) { LOGE("libmain.so laden fehlgeschlagen"); return -1; }
     LOGI("libmain.so geladen: %p", g_libmain_handle);
     if (!heap_is_sane("nach libmain")) return -1;
+
     try_call_onload("libmain", g_libmain_handle);
 
-    snprintf(path, sizeof(path), "%s/libunity.so", DEAD_EFFECT_LIBDIR);
-    LOGI("Lade %s", path);
-    g_libunity_handle = so_load(path);
-    if (!g_libunity_handle) { LOGE("libunity.so laden fehlgeschlagen"); return -1; }
-    LOGI("libunity.so geladen: %p", g_libunity_handle);
-    if (!heap_is_sane("nach libunity")) return -1;
-    so_dump_symbols(g_libunity_handle);
-    try_call_onload("libunity", g_libunity_handle);
-
-    snprintf(path, sizeof(path), "%s/libil2cpp.so", DEAD_EFFECT_LIBDIR);
-    LOGI("Lade %s", path);
-    g_libil2cpp_handle = so_load(path);
-    if (!g_libil2cpp_handle) { LOGE("libil2cpp.so laden fehlgeschlagen"); return -1; }
-    LOGI("libil2cpp.so geladen: %p", g_libil2cpp_handle);
-    if (!heap_is_sane("nach libil2cpp")) return -1;
-    try_call_onload("libil2cpp", g_libil2cpp_handle);
-
-    jni_dump_natives();
-
-    const char *UP = "com/unity3d/player/UnityPlayer";
-    unity_init_jni      = (initJni_t)      jni_find_native(UP, "initJni");
-    unity_native_render = (nativeRender_t) jni_find_native(UP, "nativeRender");
-    unity_native_pause  = (nativePause_t)  jni_find_native(UP, "nativePause");
-
-    LOGI("  initJni      = %p", unity_init_jni);
-    LOGI("  nativeRender = %p", unity_native_render);
-    LOGI("  nativePause  = %p", unity_native_pause);
-
-    if (!unity_init_jni) {
-        LOGE("initJni nicht in JNI-Registry gefunden!");
+    /* NativeLoader.load triggert in libmain.so das Laden von
+     * libunity.so, libil2cpp.so (per dlopen-Hook) und ruft
+     * intern UnityPlayer.initJni auf. */
+    LOGI("Rufe NativeLoader.load(%s)", DEAD_EFFECT_LIBDIR);
+    int rc = jni_call_native_loader(
+        "com/unity3d/player/NativeLoader", "load", DEAD_EFFECT_LIBDIR);
+    if (rc != 0) {
+        LOGE("NativeLoader.load fehlgeschlagen (rc=%d)", rc);
         return -1;
     }
-    void *env = jni_get_env();
-    LOGI("Rufe initJni(env=%p, NULL, NULL)", env);
-    unity_init_jni(env, NULL, NULL);
-    LOGI("initJni OK");
+    LOGI("NativeLoader.load OK");
+
+    /* Handle auf libunity besorgen: NativeLoader hat es bereits
+     * geladen, aber wir kennen den Zeiger nicht. Sicherheitshalber
+     * prüfen, ob es im dlopen-Hook gelandet ist. */
+    const char *UP = "com/unity3d/player/UnityPlayer";
+    unity_main_fn      = (UnityMain_t)   jni_find_native(UP, "UnityMain");
+    unity_native_pause = (nativePause_t) jni_find_native(UP, "nativePause");
+
+    LOGI("  UnityMain    = %p", unity_main_fn);
+    LOGI("  nativePause  = %p", unity_native_pause);
+
+    if (!unity_main_fn) {
+        LOGE("UnityMain nicht in JNI-Registry gefunden!");
+        jni_dump_natives();
+        return -1;
+    }
+
     return 0;
+}
+
+/* ============================================================
+ * UnityMain-Thread: blockiert bis Spiel beendet.
+ * ============================================================ */
+static volatile int g_unity_running = 0;
+
+static void *unity_main_thread(void *arg) {
+    (void)arg;
+    void *env = jni_get_env();
+    LOGI("UnityMain-Thread startet (env=%p, thiz=%p)", env, g_android_window);
+    g_unity_running = 1;
+    unity_main_fn(env, g_android_window);
+    g_unity_running = 0;
+    LOGI("UnityMain-Thread beendet");
+    return NULL;
 }
 
 int main(int argc, char **argv) {
@@ -293,32 +333,33 @@ int main(int argc, char **argv) {
 
     jni_shim_set_egl(egl_dpy, egl_surf, egl_ctx);
 
+    /* UnityMain im eigenen Thread starten.
+     * Der Main-Thread kümmert sich um SDL-Input und Quit. */
+    pthread_t t;
+    if (pthread_create(&t, NULL, unity_main_thread, NULL) != 0) {
+        LOGE("pthread_create für UnityMain fehlgeschlagen");
+        return 1;
+    }
+
     int running = 1;
-    void *env = jni_get_env();
-    int frame = 0;
     while (running) {
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             if (ev.type == SDL_QUIT) running = 0;
-            if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE) running = 0;
+            if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE)
+                running = 0;
             jni_shim_handle_sdl_event(&ev);
         }
-        if (unity_native_render && env) {
-            LOGI("render frame %d — rufe nativeRender ...", frame);
-            unity_native_render(env, NULL, (long long)SDL_GetTicks(), 640, 480);
-            LOGI("render frame %d — nativeRender OK", frame);
-        } else {
-            LOGI("render frame %d — kein nativeRender/ env", frame);
-        }
-        SDL_GL_SwapWindow(sdl_win);
-        frame++;
-        if (frame > 5) {
-            /* Nach 5 Frames absichtlich beenden, damit Test kurz bleibt */
-            LOGI("5 Frames erreicht — beende Test");
-            running = 0;
-        }
+        SDL_Delay(16);
+        if (!g_unity_running) running = 0;
     }
-    if (unity_native_pause && env) unity_native_pause(env, NULL);
+
+    void *env = jni_get_env();
+    if (unity_native_pause && env) {
+        LOGI("nativePause aufrufen");
+        unity_native_pause(env, NULL);
+    }
+
     LOGI("Loader beendet");
     return 0;
 }
