@@ -12,13 +12,16 @@ mkdir -p "$WORK"
 
 BUILD_LOG="$WORK/build.log"
 SYMS_FILE="$WORK/undefined_symbols.txt"
+GLIBC_AUDIT="$WORK/glibc-audit.txt"
 JNI_META="$WORK/jni_meta"
 ZIP_FILE="$OUT/DeadEffect-Port.zip"
 
 : > "$BUILD_LOG"
 : > "$SYMS_FILE"
+: > "$GLIBC_AUDIT"
 mkdir -p "$JNI_META"
 echo "Build gestartet: $(date -u)" > "$SYMS_FILE"
+echo "Target: glibc <= 2.17 (universal-low-glibc, wie DT)" > "$GLIBC_AUDIT"
 
 log() { echo "$@" | tee -a "$BUILD_LOG" >&2; }
 
@@ -188,11 +191,11 @@ ls -la "$BUILD_SRC" 2>&1 | tee -a "$BUILD_LOG"
 cd "$BUILD_SRC"
 
 # CFLAGS:
-# - -fno-stack-protector global: GCC 9 aarch64 ignoriert das
-#   no_stack_protector-Attribut, deshalb global ausschalten,
-#   damit der Crash-Handler zuverlässig läuft.
-# - -rdynamic / -Wl,--export-dynamic unten: macht dlopen/dlsym/stat
-#   im dynsym des Loaders sichtbar, damit libunity sie findet.
+#  - -fno-stack-protector: global, damit der Crash-Handler zuverlässig läuft
+#    (GCC 9 aarch64 ignoriert __attribute__((no_stack_protector)))
+#  - -D_GNU_SOURCE: dlvsym, __libc_dlopen_mode
+#  - -Wl,--hash-style=both: ältere glibc akzeptiert sowohl sysv als auch gnu
+#  - -Wl,--build-id=none: DT-Loader hat BuildID, aber wir brauchen's nicht
 CFLAGS="-D_GNU_SOURCE -O2 -fPIC -fno-omit-frame-pointer -fno-stack-protector"
 CFLAGS="$CFLAGS -DDEAD_EFFECT_LIBDIR=\"/roms/ports/DeadEffect/lib\""
 CFLAGS="$CFLAGS -DDEAD_EFFECT_ASSETS=\"/roms/ports/DeadEffect/assets\""
@@ -205,6 +208,8 @@ CFLAGS="$CFLAGS -I/usr/include/SDL2 -I/usr/aarch64-linux-gnu/include/SDL2"
 
 LDFLAGS="-L/usr/aarch64-linux-gnu/lib -lSDL2 -lGLESv2 -lEGL -ldl -lm -lpthread -lstdc++ -lgcc_s"
 LDFLAGS="$LDFLAGS -rdynamic -Wl,-E -Wl,--export-dynamic"
+LDFLAGS="$LDFLAGS -Wl,--hash-style=both"
+LDFLAGS="$LDFLAGS -Wl,-z,noexecstack -Wl,-z,relro -Wl,-z,now"
 
 SRCS=$(ls *.c 2>/dev/null | grep -v '^main\.c$' || true)
 log "Kompiliere: $SRCS"
@@ -215,12 +220,8 @@ for src in $SRCS; do
     OBJ="/tmp/$(basename "$src" .c).o"
     log "--- $src ---"
     ( aarch64-linux-gnu-gcc $CFLAGS -c "$src" -o "$OBJ" 2>&1 | head -60 ) | tee -a "$BUILD_LOG"
-    if [ -f "$OBJ" ]; then
-        OBJS="$OBJS $OBJ"
-    else
-        log "  [FEHLER] $src kompiliert nicht"
-        COMPILE_FAILED=1
-    fi
+    if [ -f "$OBJ" ]; then OBJS="$OBJS $OBJ"
+    else log "  [FEHLER] $src kompiliert nicht"; COMPILE_FAILED=1; fi
 done
 
 if [ "$COMPILE_FAILED" = "1" ]; then
@@ -230,14 +231,11 @@ else
     ( aarch64-linux-gnu-gcc -o deadeffect-loader $OBJS $LDFLAGS 2>&1 | head -100 ) | tee -a "$BUILD_LOG"
 fi
 
-# Prüfung: enthält der Loader die kritischen Symbole?
+# ---- Symbol- und glibc-Audit ----
 LOADER_OK=0
 if [ -f deadeffect-loader ]; then
     SZ=$(stat -c%s deadeffect-loader)
-    HAS_MAIN=0
-    HAS_SL=0
-    HAS_DLOPEN=0
-    HAS_SO_ISH=0
+    HAS_MAIN=0; HAS_SL=0; HAS_DLOPEN=0; HAS_SO_ISH=0
     nm -D deadeffect-loader 2>/dev/null | grep -q ' T main'             && HAS_MAIN=1
     nm -D deadeffect-loader 2>/dev/null | grep -q ' T slCreateEngine'   && HAS_SL=1
     nm -D deadeffect-loader 2>/dev/null | grep -q ' T dlopen'           && HAS_DLOPEN=1
@@ -249,9 +247,35 @@ if [ -f deadeffect-loader ]; then
         log "[OK] Loader gebaut ($SZ Bytes) — main+slCreateEngine+dlopen+so_is_our_handle"
         file deadeffect-loader | tee -a "$BUILD_LOG"
         readelf -d deadeffect-loader 2>/dev/null | grep NEEDED | tee -a "$BUILD_LOG" || true
+
+        # glibc-Audit (DT-Ziel: max 2.17)
+        log "==> glibc-Audit (max erlaubt: 2.17)"
+        {
+            echo "=== GLIBC symbol versions referenced ==="
+            readelf -sW deadeffect-loader 2>/dev/null | \
+              grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu | tail -5
+            echo "=== GLIBCXX ==="
+            readelf -sW deadeffect-loader 2>/dev/null | \
+              grep -oE 'GLIBCXX_[0-9.]+' | sort -Vu | tail -5 || echo "(keine)"
+            echo "=== CXXABI ==="
+            readelf -sW deadeffect-loader 2>/dev/null | \
+              grep -oE 'CXXABI_[0-9.]+' | sort -Vu | tail -5 || echo "(keine)"
+        } | tee -a "$GLIBC_AUDIT"
+
+        MAX_GLIBC=$(readelf -sW deadeffect-loader 2>/dev/null | \
+                    grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu | tail -1 | sed 's/GLIBC_//')
+        if [ -n "$MAX_GLIBC" ]; then
+            case "$MAX_GLIBC" in
+                2.2|2.3|2.4|2.5|2.6|2.7|2.8|2.9|2.1[0-7])
+                    log "[OK] glibc max = $MAX_GLIBC (<= 2.17, DT-konform)"
+                    ;;
+                *)
+                    log "[WARN] glibc max = $MAX_GLIBC (> 2.17) — evtl. nicht auf älteren CFWs lauffähig"
+                    ;;
+            esac
+        fi
     else
         log "[FEHLER] Kern-Symbole fehlen (main=$HAS_MAIN, slCreateEngine=$HAS_SL, dlopen=$HAS_DLOPEN, so_is_our_handle=$HAS_SO_ISH)"
-        nm -D deadeffect-loader 2>/dev/null | grep -E ' T (main|slCreateEngine|so_load|jni_get_env|dlopen|dlsym|so_is_our_handle)' | tee -a "$BUILD_LOG"
     fi
 else
     log "[FEHLER] Linken fehlgeschlagen"
@@ -259,7 +283,7 @@ fi
 
 {
     echo "=== Loader_ok: $LOADER_OK ==="
-    echo "=== Undefined symbols (falls vorhanden) ==="
+    echo "=== Undefined symbols ==="
     [ -f deadeffect-loader ] && nm -D --undefined-only deadeffect-loader 2>/dev/null | head -200
 } > "$SYMS_FILE" 2>&1
 
@@ -319,6 +343,7 @@ READMEEOF
 mkdir -p port/DeadEffect/debug_analysis
 cp "$BUILD_LOG" port/DeadEffect/debug_analysis/ 2>/dev/null || true
 cp "$SYMS_FILE" port/DeadEffect/debug_analysis/ 2>/dev/null || true
+cp "$GLIBC_AUDIT" port/DeadEffect/debug_analysis/ 2>/dev/null || true
 cp -r "$JNI_META" port/DeadEffect/debug_analysis/ 2>/dev/null || true
 if [ -d "$BUILD_SRC" ]; then
     for f in "$BUILD_SRC"/*.c "$BUILD_SRC"/*.h; do
@@ -334,5 +359,4 @@ cd "$WORK"
 log "=== ZIP: $ZIP_FILE ==="
 unzip -l "$ZIP_FILE" 2>/dev/null | tee -a "$BUILD_LOG" || true
 log "==> Build fertig."
-
 exit 0
