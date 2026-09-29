@@ -90,6 +90,10 @@ static void dump_fp_chain(uint64_t fp, uint64_t pc, uint64_t lr) {
 
 __attribute__((noinline))
 static void crash_handler(int sig, siginfo_t *info, void *uctx) {
+    if (!uctx) {
+        safe_write("\n### SIGNAL but uctx=NULL ###\n");
+        _exit(128 + sig);
+    }
     ucontext_t *uc = (ucontext_t *)uctx;
     char hexbuf[24];
     char decbuf[16];
@@ -144,7 +148,9 @@ static void install_crash_handler(void) {
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = crash_handler;
-    sa.sa_flags     = SA_SIGINFO | SA_RESETHAND | SA_ONSTACK;
+    sa.sa_flags     = SA_SIGINFO | SA_ONSTACK;  /* KEIN SA_RESETHAND mehr,
+                                                 * damit der Handler auch
+                                                 * mehrfach feuert */
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, NULL);
     sigaction(SIGBUS,  &sa, NULL);
@@ -153,14 +159,14 @@ static void install_crash_handler(void) {
     sigaction(SIGABRT, &sa, NULL);
 }
 
-/* Watchdog-Thread: libunity ueberschreibt den Crash-Handler waehrend
- * nativeSendSurfaceChangedEvent. Dieser Thread setzt unseren Handler
- * kontinuierlich neu, damit er beim Crash aktiv ist. */
+/* Watchdog: installiert den Handler sehr aggressiv (alle 10ms) neu,
+ * weil libunity ihn offenbar waehrend nativeSendSurfaceChangedEvent
+ * ueberschreibt. */
 static void *crash_handler_watchdog(void *arg) {
     (void)arg;
     for (;;) {
         install_crash_handler();
-        usleep(100000);  /* 100 ms */
+        usleep(10000);  /* 10 ms */
     }
     return NULL;
 }
@@ -177,7 +183,7 @@ void *g_libil2cpp_handle = NULL;
 
 static struct {
     void *class_ref;
-    uint8_t payload[256];
+    uint8_t payload[512];
 } g_fake_unity_player_obj = {0};
 
 static void *g_unity_player_thiz = &g_fake_unity_player_obj;
@@ -331,11 +337,18 @@ static int load_module_chain(void) {
     return 0;
 }
 
+/* Hilfsfunktion: installiert den Crash-Handler direkt vor einem
+ * kritischen nativen Aufruf, um sicherzustellen, dass libunity ihn
+ * nicht kurz vorher ueberschrieben hat. */
+static void arm_crash_handler(const char *what) {
+    install_crash_handler();
+    LOGI("[arm] crash handler installiert vor %s", what);
+}
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
     rawlog("[boot] main() entered\n");
     install_crash_handler();
-    rawlog("[boot] crash handler installed\n");
 
     LOGI("Dead Effect Loader startet");
     LOGI("  libdir = %s", DEAD_EFFECT_LIBDIR);
@@ -365,20 +378,29 @@ int main(int argc, char **argv) {
     jni_shim_set_egl(egl_dpy, egl_surf, egl_ctx);
     void *env = jni_get_env();
 
-    LOGI("g_unity_player_thiz = %p (statisches Objekt, 256+ Bytes)", g_unity_player_thiz);
+    LOGI("g_unity_player_thiz = %p (statisches Objekt, 512+ Bytes)", g_unity_player_thiz);
 
-    /* --- 1. Surface Callbacks --- */
-    if (unity_native_surface_changed) {
-        LOGI("Rufe nativeSendSurfaceChangedEvent(env=%p, thiz=%p, 640, 480)",
+    /* === DIAGNOSE-LAUF: nativeSendSurfaceChangedEvent ueberspringen ===
+     * Die Funktion crasht, bevor sie irgendeine JNI-Methode aufruft.
+     * Sie erwartet vermutlich ein echtes Java-Objekt, kein Fake.
+     * Wir versuchen, ohne sie weiterzukommen.
+     */
+    LOGI("[SKIP] nativeSendSurfaceChangedEvent wird uebersprungen");
+
+    /* --- nativeRecreateGfxState versuchen --- */
+    if (unity_native_recreate_gfx_state) {
+        arm_crash_handler("nativeRecreateGfxState");
+        LOGI("Rufe nativeRecreateGfxState(env=%p, thiz=%p, 0, NULL)",
              env, g_unity_player_thiz);
-        unity_native_surface_changed(env, g_unity_player_thiz, 640, 480);
-        LOGI("nativeSendSurfaceChangedEvent OK");
+        unity_native_recreate_gfx_state(env, g_unity_player_thiz, 0, NULL);
+        LOGI("nativeRecreateGfxState OK");
     } else {
-        LOGI("[WARN] nativeSendSurfaceChangedEvent nicht gefunden");
+        LOGI("[WARN] nativeRecreateGfxState nicht gefunden");
     }
 
-    /* --- 2. Focus Gain --- */
+    /* --- Focus Gain --- */
     if (unity_native_focus_change) {
+        arm_crash_handler("nativeFocusChanged");
         LOGI("Rufe nativeFocusChanged(env=%p, thiz=%p, true)",
              env, g_unity_player_thiz);
         unity_native_focus_change(env, g_unity_player_thiz, 1);
@@ -387,8 +409,9 @@ int main(int argc, char **argv) {
         LOGI("[WARN] nativeFocusChanged nicht gefunden");
     }
 
-    /* --- 3. Resume --- */
+    /* --- Resume --- */
     if (unity_native_resume) {
+        arm_crash_handler("nativeResume");
         LOGI("Rufe nativeResume(env=%p, thiz=%p)", env, g_unity_player_thiz);
         unity_native_resume(env, g_unity_player_thiz);
         LOGI("nativeResume OK");
@@ -396,7 +419,7 @@ int main(int argc, char **argv) {
         LOGI("[WARN] nativeResume nicht gefunden");
     }
 
-    /* --- 4. Render-Loop --- */
+    /* --- Render-Loop --- */
     int running = 1;
     int frame   = 0;
     while (running) {
@@ -407,6 +430,7 @@ int main(int argc, char **argv) {
             jni_shim_handle_sdl_event(&ev);
         }
         if (unity_native_render && env) {
+            arm_crash_handler("nativeRender");
             LOGI("render frame %d — rufe nativeRender(env=%p, thiz=%p) ...",
                  frame, env, g_unity_player_thiz);
             unsigned char ok = unity_native_render(env, g_unity_player_thiz);
@@ -422,8 +446,9 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* --- 5. Shutdown --- */
+    /* --- Shutdown --- */
     if (unity_native_pause && env) {
+        arm_crash_handler("nativePause");
         LOGI("Rufe nativePause(env=%p, thiz=%p)", env, g_unity_player_thiz);
         unity_native_pause(env, g_unity_player_thiz);
     }
