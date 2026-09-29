@@ -148,9 +148,7 @@ static void install_crash_handler(void) {
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = crash_handler;
-    sa.sa_flags     = SA_SIGINFO | SA_ONSTACK;  /* KEIN SA_RESETHAND mehr,
-                                                 * damit der Handler auch
-                                                 * mehrfach feuert */
+    sa.sa_flags     = SA_SIGINFO | SA_ONSTACK;  /* KEIN SA_RESETHAND */
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, NULL);
     sigaction(SIGBUS,  &sa, NULL);
@@ -159,9 +157,8 @@ static void install_crash_handler(void) {
     sigaction(SIGABRT, &sa, NULL);
 }
 
-/* Watchdog: installiert den Handler sehr aggressiv (alle 10ms) neu,
- * weil libunity ihn offenbar waehrend nativeSendSurfaceChangedEvent
- * ueberschreibt. */
+/* Watchdog: installiert den Handler alle 10 ms neu, weil libunity ihn
+ * waehrend nativeSendSurfaceChangedEvent ueberschreibt. */
 static void *crash_handler_watchdog(void *arg) {
     (void)arg;
     for (;;) {
@@ -181,6 +178,14 @@ void *g_libmain_handle   = NULL;
 void *g_libunity_handle  = NULL;
 void *g_libil2cpp_handle = NULL;
 
+/* ---------------------------------------------------------------------
+ * Fake UnityPlayer-Objekt (dient als `thiz` fuer alle nativen Methoden)
+ *
+ * Wichtig: Der erste 8-Byte-Block eines Java-Objekts ist normalerweise
+ * der Zeiger auf die Klasse (object header). libunity liest diesen
+ * Header bei manchen Methoden aus. `class_ref` wird deshalb auf einen
+ * stabilen, nicht-NULL Zeiger gesetzt.
+ * ------------------------------------------------------------------- */
 static struct {
     void *class_ref;
     uint8_t payload[512];
@@ -330,16 +335,27 @@ static int load_module_chain(void) {
         LOGE("initJni nicht in JNI-Registry gefunden!");
         return -1;
     }
+
+    /* -----------------------------------------------------------------
+     * FIX: initJni MUSS mit einem gueltigen `thiz` aufgerufen werden.
+     *
+     * In der echten Android-Runtime ist `thiz` das UnityPlayer-Java-Objekt.
+     * libunity speichert diesen Zeiger intern und dereferenziert ihn spaeter
+     * in nativeSendSurfaceChangedEvent / nativeFocusChanged usw.
+     *
+     * Bisher: unity_init_jni(env, NULL, NULL)  -> interner Zeiger = NULL
+     *         -> SIGSEGV in nativeSendSurfaceChangedEvent.
+     *
+     * Jetzt:  unity_init_jni(env, g_unity_player_thiz, NULL)
+     *         -> interner Zeiger = g_fake_unity_player_obj (512+ Bytes)
+     * ----------------------------------------------------------------- */
     void *env = jni_get_env();
-    LOGI("Rufe initJni(env=%p, NULL, NULL)", env);
-    unity_init_jni(env, NULL, NULL);
+    LOGI("Rufe initJni(env=%p, thiz=%p, NULL)", env, g_unity_player_thiz);
+    unity_init_jni(env, g_unity_player_thiz, NULL);
     LOGI("initJni OK");
     return 0;
 }
 
-/* Hilfsfunktion: installiert den Crash-Handler direkt vor einem
- * kritischen nativen Aufruf, um sicherzustellen, dass libunity ihn
- * nicht kurz vorher ueberschrieben hat. */
 static void arm_crash_handler(const char *what) {
     install_crash_handler();
     LOGI("[arm] crash handler installiert vor %s", what);
@@ -356,6 +372,16 @@ int main(int argc, char **argv) {
 
     jni_shim_init();
     rawlog("[boot] jni_shim_init done\n");
+
+    /* -----------------------------------------------------------------
+     * Fake-UnityPlayer-Objekt vorbereiten:
+     *   class_ref = Zeiger auf das Objekt selbst, damit Unitys
+     *   Object-Header-Check (erste 8 Bytes) nicht auf NULL trifft.
+     * ----------------------------------------------------------------- */
+    g_fake_unity_player_obj.class_ref = &g_fake_unity_player_obj;
+    LOGI("Fake-UnityPlayer-Objekt vorbereitet: thiz=%p class_ref=%p",
+         g_unity_player_thiz, g_fake_unity_player_obj.class_ref);
+
     preload_libcxx();
     rawlog("[boot] preload_libcxx done\n");
 
@@ -380,14 +406,17 @@ int main(int argc, char **argv) {
 
     LOGI("g_unity_player_thiz = %p (statisches Objekt, 512+ Bytes)", g_unity_player_thiz);
 
-    /* === DIAGNOSE-LAUF: nativeSendSurfaceChangedEvent ueberspringen ===
-     * Die Funktion crasht, bevor sie irgendeine JNI-Methode aufruft.
-     * Sie erwartet vermutlich ein echtes Java-Objekt, kein Fake.
-     * Wir versuchen, ohne sie weiterzukommen.
-     */
-    LOGI("[SKIP] nativeSendSurfaceChangedEvent wird uebersprungen");
+    /* === TESTLAUF: nativeSendSurfaceChangedEvent jetzt wieder aktiviert === */
+    if (unity_native_surface_changed) {
+        arm_crash_handler("nativeSendSurfaceChangedEvent");
+        LOGI("Rufe nativeSendSurfaceChangedEvent(env=%p, thiz=%p, 640, 480)",
+             env, g_unity_player_thiz);
+        unity_native_surface_changed(env, g_unity_player_thiz, 640, 480);
+        LOGI("nativeSendSurfaceChangedEvent OK");
+    } else {
+        LOGI("[WARN] nativeSendSurfaceChangedEvent nicht gefunden");
+    }
 
-    /* --- nativeRecreateGfxState versuchen --- */
     if (unity_native_recreate_gfx_state) {
         arm_crash_handler("nativeRecreateGfxState");
         LOGI("Rufe nativeRecreateGfxState(env=%p, thiz=%p, 0, NULL)",
@@ -398,7 +427,6 @@ int main(int argc, char **argv) {
         LOGI("[WARN] nativeRecreateGfxState nicht gefunden");
     }
 
-    /* --- Focus Gain --- */
     if (unity_native_focus_change) {
         arm_crash_handler("nativeFocusChanged");
         LOGI("Rufe nativeFocusChanged(env=%p, thiz=%p, true)",
@@ -409,7 +437,6 @@ int main(int argc, char **argv) {
         LOGI("[WARN] nativeFocusChanged nicht gefunden");
     }
 
-    /* --- Resume --- */
     if (unity_native_resume) {
         arm_crash_handler("nativeResume");
         LOGI("Rufe nativeResume(env=%p, thiz=%p)", env, g_unity_player_thiz);
@@ -419,7 +446,6 @@ int main(int argc, char **argv) {
         LOGI("[WARN] nativeResume nicht gefunden");
     }
 
-    /* --- Render-Loop --- */
     int running = 1;
     int frame   = 0;
     while (running) {
@@ -446,7 +472,6 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* --- Shutdown --- */
     if (unity_native_pause && env) {
         arm_crash_handler("nativePause");
         LOGI("Rufe nativePause(env=%p, thiz=%p)", env, g_unity_player_thiz);
