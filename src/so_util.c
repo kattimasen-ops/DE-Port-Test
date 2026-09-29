@@ -26,6 +26,9 @@
 #ifndef R_AARCH64_COPY
 #define R_AARCH64_COPY 1024
 #endif
+#ifndef R_AARCH64_IRELATIVE
+#define R_AARCH64_IRELATIVE 1032
+#endif
 
 #define TAG "so_util"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
@@ -73,6 +76,8 @@ static void *resolve_symbol_full(const char *name) {
                 return (char *)m->base + s->st_value;
         }
     }
+    /* RTLD_DEFAULT findet zuerst unsere eigenen -rdynamic-Exporte
+     * (u.a. dlopen/dlsym-Hook, __android_log_print, stat, ...). */
     void *p = dlsym(RTLD_DEFAULT, lookup);
     if (p) return p;
 
@@ -104,6 +109,7 @@ static void *resolve_symbol_cached(const char *name) {
     return addr;
 }
 
+/* IRELATIVE wird in einem zweiten Pass behandelt. */
 static void relocate(so_module *m, Elf64_Rela *rel, size_t count) {
     for (size_t i = 0; i < count; i++) {
         Elf64_Rela *r = &rel[i];
@@ -147,11 +153,30 @@ static void relocate(so_module *m, Elf64_Rela *rel, size_t count) {
                 }
                 ptr[0] = 0; ptr[1] = 0; break;
             }
+            case R_AARCH64_IRELATIVE:
+                /* Bewusst übersprungen — zweiter Pass. */
+                break;
             default:
                 LOGI("Unknown reloc type %u at 0x%lx", type,
                      (unsigned long)r->r_offset);
                 break;
         }
+    }
+}
+
+/* Zweiter Pass: IRELATIVE-Resolvers aufrufen.
+ * Muss NACH den normalen Relocations laufen, weil der Resolver
+ * bereits aufgelöste Symbole (malloc, dlsym, ...) verwenden kann. */
+static void apply_irelative(so_module *m, Elf64_Rela *rel, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        Elf64_Rela *r = &rel[i];
+        uint32_t type = ELF64_R_TYPE(r->r_info);
+        if (type != R_AARCH64_IRELATIVE) continue;
+        if (r->r_offset + 8 > m->size) continue;
+        uint64_t *ptr = (uint64_t *)((uintptr_t)m->base + r->r_offset);
+        typedef void *(*resolver_t)(void);
+        resolver_t res = (resolver_t)((char *)m->base + r->r_addend);
+        *ptr = (uint64_t) res();
     }
 }
 
@@ -282,10 +307,16 @@ void *so_load(const char *path) {
         uint32_t *chain = &buckets[nbuckets];
         uint32_t max_idx = symoffset;
         for (uint32_t i = 0; i < nbuckets; i++) {
-            uint32_t idx = buckets[i]; if (idx < symoffset) continue;
-            while (1) { uint32_t h = chain[idx - symoffset];
+            uint32_t idx = buckets[i];
+            if (idx < symoffset) continue;
+            /* FIX: max_idx VOR dem Ketten-Abbruch aktualisieren,
+             * sonst geht der letzte Eintrag verloren. */
+            while (1) {
+                if (idx > max_idx) max_idx = idx;
+                uint32_t h = chain[idx - symoffset];
                 if (h & 1) break;
-                if (idx > max_idx) max_idx = idx; idx++; }
+                idx++;
+            }
         }
         m->symcount = max_idx + 1;
     } else m->symcount = 65536;
@@ -301,6 +332,10 @@ void *so_load(const char *path) {
     if (relr && relr_sz) apply_relr(m, relr, relr_sz);
     if (m->rela && m->relacount) relocate(m, m->rela, m->relacount);
     if (m->jmprel && m->jmprelcount) relocate(m, m->jmprel, m->jmprelcount);
+
+    /* Zweiter Pass: IRELATIVE */
+    if (m->rela && m->relacount) apply_irelative(m, m->rela, m->relacount);
+    if (m->jmprel && m->jmprelcount) apply_irelative(m, m->jmprel, m->jmprelcount);
 
     if (m->init_fn) { LOGI("=== DT_INIT ==="); m->init_fn(); }
 
@@ -333,6 +368,17 @@ void *so_find_addr(void *handle, const char *name) {
     return NULL;
 }
 
+/* NEU: prüft, ob ein Handle von uns stammt. Wird vom dlsym-Hook
+ * verwendet, um zwischen echten libdl-Handles und unseren
+ * so_module-Zeigern zu unterscheiden. */
+int so_is_our_handle(void *handle) {
+    if (!handle) return 0;
+    for (int i = 0; i < g_nmods; i++) {
+        if (g_modules[i].base == handle) return 1;
+    }
+    return 0;
+}
+
 void so_flush_caches(void) { }
 void so_set_imports(void)  { }
 
@@ -346,7 +392,8 @@ void so_dump_symbols(void *handle) {
         if (s->st_shndx == SHN_UNDEF || !s->st_name) continue;
         const char *name = m->strtab + s->st_name;
         if (strstr(name, "JNI_OnLoad") || strstr(name, "UnityPlayer") ||
-            strstr(name, "NativeLoader") || strstr(name, "il2cpp_")) {
+            strstr(name, "NativeLoader") || strstr(name, "il2cpp_") ||
+            strstr(name, "UnityMain")) {
             LOGI("  %s", name); shown++;
         }
     }
