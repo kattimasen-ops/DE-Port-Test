@@ -9,7 +9,10 @@ void   so_flush_caches(void);
 void   so_set_imports(void);
 void   so_dump_symbols(void *handle);
 
-/* NEU: für dlopen/dlsym-Hook */
 int    so_is_our_handle(void *handle);
+
+/* NEU: Modul-Inspektion für load_module_chain() */
+int    so_module_count(void);
+const char *so_module_path(int index);
 
 #endif /* SO_UTIL_H */
