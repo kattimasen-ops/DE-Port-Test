@@ -11,8 +11,6 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
-/* jchar ist in <jni.h> als uint16_t definiert. Wir binden <jni.h>
- * nicht ein, also definieren wir es lokal. */
 typedef uint16_t jchar;
 
 static EGLDisplay g_dpy  = EGL_NO_DISPLAY;
@@ -55,8 +53,6 @@ typedef struct { void *functions; } jni_env_t;
 static uintptr_t     g_env_table[JNI_TABLE_SIZE];
 static jni_env_t     g_env_singleton;
 
-/* Groessere Puffer fuer Fake-Objekte.
- * Unity liest ueber diese Zeiger hinaus, ein int (4 Byte) ist zu klein. */
 static uint8_t g_fake_class_storage[64] = {0};
 static uint8_t g_fake_mid_storage[64]   = {0};
 static uint8_t g_fake_fid_storage[64]   = {0};
@@ -113,6 +109,61 @@ static void *jni_env_GetStaticFieldID(void *env, void *cls,
     return g_fake_fid_storage;
 }
 
+/* === NEU: Feldzugriffe === */
+static void *jni_env_GetStaticObjectField(void *env, void *cls, void *fid) {
+    (void)env; (void)cls; (void)fid;
+    return g_fake_obj_storage;
+}
+static void *jni_env_GetObjectField(void *env, void *obj, void *fid) {
+    (void)env; (void)obj; (void)fid;
+    return g_fake_obj_storage;
+}
+static void jni_env_SetObjectField(void *env, void *obj, void *fid, void *val) {
+    (void)env; (void)obj; (void)fid; (void)val;
+}
+static int jni_env_GetStaticIntField(void *env, void *cls, void *fid) {
+    (void)env; (void)cls; (void)fid;
+    return 0;
+}
+static int jni_env_GetIntField(void *env, void *obj, void *fid) {
+    (void)env; (void)obj; (void)fid;
+    return 0;
+}
+static void jni_env_SetIntField(void *env, void *obj, void *fid, int val) {
+    (void)env; (void)obj; (void)fid; (void)val;
+}
+
+/* === NEU: Array-Zugriffe === */
+static void *jni_env_GetObjectArrayElement(void *env, void *arr, int idx) {
+    (void)env; (void)arr; (void)idx;
+    return g_fake_obj_storage;
+}
+static void *jni_env_NewObjectArray(void *env, int len, void *cls, void *init) {
+    (void)env; (void)len; (void)cls; (void)init;
+    return g_fake_obj_storage;
+}
+static void jni_env_SetObjectArrayElement(void *env, void *arr, int idx, void *val) {
+    (void)env; (void)arr; (void)idx; (void)val;
+}
+
+/* === NEU: Call-Methoden mit va_list === */
+static uintptr_t jni_env_CallStaticVoidMethodA(void *env, void *cls, void *mid, void *args) {
+    (void)env; (void)cls; (void)mid; (void)args;
+    return 0;
+}
+static uintptr_t jni_env_CallVoidMethodA(void *env, void *obj, void *mid, void *args) {
+    (void)env; (void)obj; (void)mid; (void)args;
+    return 0;
+}
+static uintptr_t jni_env_CallObjectMethodV(void *env, void *obj, void *mid, void *args) {
+    (void)env; (void)obj; (void)mid; (void)args;
+    return 0;
+}
+static uintptr_t jni_env_CallStaticObjectMethodV(void *env, void *cls, void *mid, void *args) {
+    (void)env; (void)cls; (void)mid; (void)args;
+    return 0;
+}
+
 static int jni_env_RegisterNatives(void *env, void *cls,
                                    const void *methods, int n) {
     (void)env; (void)cls;
@@ -149,8 +200,6 @@ static void *jni_env_NewStringUTF(void *env, const char *utf) {
     LOGI("JNI NewStringUTF(%s)", utf ? utf : "(null)");
     return (void *)utf;
 }
-
-/* NewString: UTF-16 -> UTF-8. jchar ist hier uint16_t. */
 static void *jni_env_NewString(void *env, const jchar *unicode, int len) {
     (void)env;
     if (!unicode || len <= 0) return (void *)"";
@@ -161,7 +210,6 @@ static void *jni_env_NewString(void *env, const jchar *unicode, int len) {
     LOGI("JNI NewString(%d) -> %s", len, out);
     return out;
 }
-
 static const char *jni_env_GetStringUTFChars(void *env, void *jstr, unsigned char *isCopy) {
     (void)env;
     if (isCopy) *isCopy = 0;
@@ -248,6 +296,20 @@ static int jni_env_GetArrayLength(void *env, void *arr) { (void)env; (void)arr; 
 #define ENV_GetJavaVM             219
 #define ENV_ExceptionCheck        228
 
+#define ENV_GetStaticObjectField  145
+#define ENV_GetObjectField        95
+#define ENV_SetObjectField        96
+#define ENV_GetStaticIntField     150
+#define ENV_GetIntField           100
+#define ENV_SetIntField           101
+#define ENV_GetObjectArrayElement 173
+#define ENV_NewObjectArray        172
+#define ENV_SetObjectArrayElement 174
+#define ENV_CallStaticVoidMethodA 122
+#define ENV_CallVoidMethodA       62
+#define ENV_CallObjectMethodV     35
+#define ENV_CallStaticObjectMethodV 115
+
 #define VM_DestroyJavaVM                  3
 #define VM_AttachCurrentThread            4
 #define VM_DetachCurrentThread            5
@@ -301,6 +363,20 @@ static void jni_init_tables(void) {
     g_env_table[ENV_UnregisterNatives]      = (uintptr_t)jni_env_UnregisterNatives;
     g_env_table[ENV_GetJavaVM]              = (uintptr_t)jni_env_GetJavaVM;
     g_env_table[ENV_ExceptionCheck]         = (uintptr_t)jni_env_ExceptionCheck;
+
+    g_env_table[ENV_GetStaticObjectField]   = (uintptr_t)jni_env_GetStaticObjectField;
+    g_env_table[ENV_GetObjectField]         = (uintptr_t)jni_env_GetObjectField;
+    g_env_table[ENV_SetObjectField]         = (uintptr_t)jni_env_SetObjectField;
+    g_env_table[ENV_GetStaticIntField]      = (uintptr_t)jni_env_GetStaticIntField;
+    g_env_table[ENV_GetIntField]            = (uintptr_t)jni_env_GetIntField;
+    g_env_table[ENV_SetIntField]            = (uintptr_t)jni_env_SetIntField;
+    g_env_table[ENV_GetObjectArrayElement]  = (uintptr_t)jni_env_GetObjectArrayElement;
+    g_env_table[ENV_NewObjectArray]         = (uintptr_t)jni_env_NewObjectArray;
+    g_env_table[ENV_SetObjectArrayElement]  = (uintptr_t)jni_env_SetObjectArrayElement;
+    g_env_table[ENV_CallStaticVoidMethodA]  = (uintptr_t)jni_env_CallStaticVoidMethodA;
+    g_env_table[ENV_CallVoidMethodA]        = (uintptr_t)jni_env_CallVoidMethodA;
+    g_env_table[ENV_CallObjectMethodV]      = (uintptr_t)jni_env_CallObjectMethodV;
+    g_env_table[ENV_CallStaticObjectMethodV]= (uintptr_t)jni_env_CallStaticObjectMethodV;
 
     g_vm_table[VM_DestroyJavaVM]       = (uintptr_t)jni_vm_DestroyJavaVM;
     g_vm_table[VM_AttachCurrentThread] = (uintptr_t)jni_vm_AttachCurrentThread;
