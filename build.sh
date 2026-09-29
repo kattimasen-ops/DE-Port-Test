@@ -1,6 +1,7 @@
 #!/bin/bash
 # ============================================================
 # Dead Effect Port - Build-Skript
+# Loader-Binary: deadeffect-loader
 # ============================================================
 
 set +euo pipefail
@@ -17,6 +18,8 @@ SYMS_FILE="$WORK/undefined_symbols.txt"
 JNI_META="$WORK/jni_meta"
 ZIP_FILE="$OUT/DeadEffect-Port.zip"
 
+LOADER_NAME="deadeffect-loader"
+
 : > "$BUILD_LOG"
 : > "$SYMS_FILE"
 mkdir -p "$JNI_META"
@@ -28,6 +31,7 @@ log "==> GITHUB_WORKSPACE = $OUT"
 log "==> WORK             = $WORK"
 log "==> PWD              = $PWD"
 log "==> Shell-Optionen   = $-"
+log "==> Loader-Name      = $LOADER_NAME"
 
 # ------------------------------------------------------------
 # 1. apt
@@ -309,18 +313,18 @@ done
 if [ "$COMPILE_FAILED" = "1" ]; then
     log "[FEHLER] Mindestens eine Quelldatei fehlgeschlagen — Linken uebersprungen."
 else
-    log "==> Linke Loader"
+    log "==> Linke Loader ($LOADER_NAME)"
     (
-        aarch64-linux-gnu-gcc -o deadeffect-loader $OBJS $LDFLAGS 2>&1 | head -100
+        aarch64-linux-gnu-gcc -o "$LOADER_NAME" $OBJS $LDFLAGS 2>&1 | head -100
     ) | tee -a "$BUILD_LOG"
 fi
 
 LOADER_OK=0
-if [ -f deadeffect-loader ]; then
-    SZ=$(stat -c%s deadeffect-loader)
+if [ -f "$LOADER_NAME" ]; then
+    SZ=$(stat -c%s "$LOADER_NAME")
     SYM_OK=1
     for want in slCreateEngine jni_find_native jni_dump_natives so_load; do
-        if ! aarch64-linux-gnu-nm deadeffect-loader 2>/dev/null | grep -q " T $want\$"; then
+        if ! aarch64-linux-gnu-nm "$LOADER_NAME" 2>/dev/null | grep -q " T $want\$"; then
             log "[WARN] Symbol '$want' fehlt im Loader"
             SYM_OK=0
         fi
@@ -335,19 +339,20 @@ if [ -f deadeffect-loader ]; then
     else
         LOADER_OK=1
         log "[OK] Loader gebaut und geprueft ($SZ Bytes)"
-        file deadeffect-loader | tee -a "$BUILD_LOG"
-        ls -la deadeffect-loader | tee -a "$BUILD_LOG"
-        readelf -d deadeffect-loader 2>/dev/null | grep NEEDED | tee -a "$BUILD_LOG" || true
+        file "$LOADER_NAME" | tee -a "$BUILD_LOG"
+        ls -la "$LOADER_NAME" | tee -a "$BUILD_LOG"
+        readelf -d "$LOADER_NAME" 2>/dev/null | grep NEEDED | tee -a "$BUILD_LOG" || true
     fi
 else
     log "[FEHLER] Linken fehlgeschlagen — keine Loader-Datei vorhanden"
 fi
 
 {
+    echo "=== Loader_name: $LOADER_NAME ==="
     echo "=== Loader_ok: $LOADER_OK ==="
-    echo "=== Loader-Groesse: $(stat -c%s deadeffect-loader 2>/dev/null) Bytes ==="
+    echo "=== Loader-Groesse: $(stat -c%s "$LOADER_NAME" 2>/dev/null) Bytes ==="
     echo "=== Undefined symbols (falls vorhanden) ==="
-    [ -f deadeffect-loader ] && aarch64-linux-gnu-nm -D --undefined-only deadeffect-loader 2>/dev/null | head -200
+    [ -f "$LOADER_NAME" ] && aarch64-linux-gnu-nm -D --undefined-only "$LOADER_NAME" 2>/dev/null | head -200
 } > "$SYMS_FILE" 2>&1
 
 # ------------------------------------------------------------
@@ -358,22 +363,26 @@ cd "$WORK"
 rm -rf port
 mkdir -p port/DeadEffect/lib port/DeadEffect/assets
 
-if [ -f "$BUILD_SRC/deadeffect-loader" ] && [ "$LOADER_OK" = "1" ]; then
-    cp "$BUILD_SRC/deadeffect-loader" port/DeadEffect/
-    log "[OK] Echter Loader ins Port-Paket kopiert ($(stat -c%s port/DeadEffect/deadeffect-loader) Bytes)"
+if [ -f "$BUILD_SRC/$LOADER_NAME" ] && [ "$LOADER_OK" = "1" ]; then
+    cp "$BUILD_SRC/$LOADER_NAME" "port/DeadEffect/$LOADER_NAME"
+    log "[OK] Echter Loader ins Port-Paket kopiert ($(stat -c%s "port/DeadEffect/$LOADER_NAME") Bytes)"
 else
-    printf '#!/bin/bash\necho "Loader nicht erfolgreich gebaut"\nexit 1\n' > port/DeadEffect/deadeffect-loader
+    printf '#!/bin/bash\necho "Loader nicht erfolgreich gebaut"\nexit 1\n' > "port/DeadEffect/$LOADER_NAME"
     log "[WARN] Fallback-Loader ins Port-Paket kopiert"
 fi
-chmod +x port/DeadEffect/deadeffect-loader
+chmod +x "port/DeadEffect/$LOADER_NAME"
 
 [ -d "$WORK/de_libs/arm64-v8a" ] && cp "$WORK"/de_libs/arm64-v8a/*.so port/DeadEffect/lib/ 2>/dev/null || true
 
-if [ -f "$GITHUB_WS/DeadEffect.sh" ]; then
-    cp "$GITHUB_WS/DeadEffect.sh" port/DeadEffect/DeadEffect.sh
-    chmod +x port/DeadEffect/DeadEffect.sh
-    log "[OK] DeadEffect.sh aus Repo uebernommen"
-fi
+# Wrapper deterministisch generieren (nicht aus dem Repo kopieren),
+# damit Wrapper und Binärname nie auseinanderlaufen.
+cat > port/DeadEffect/DeadEffect.sh <<DE_SH_EOF
+#!/bin/bash
+cd /roms/ports/DeadEffect
+./${LOADER_NAME}
+DE_SH_EOF
+chmod +x port/DeadEffect/DeadEffect.sh
+log "[OK] DeadEffect.sh generiert (ruft ./${LOADER_NAME})"
 
 cat > port/DeadEffect/de_wrapper.gptk <<'GPTK'
 back = esc
@@ -400,9 +409,10 @@ l2 = tab
 r2 = shift
 GPTK
 
-cat > port/DeadEffect/README.txt <<'READMEEOF'
+cat > port/DeadEffect/README.txt <<READMEEOF
 Dead Effect - PortMaster-Port
-Loader: deadeffect-loader (Unity-IL2CPP)
+Loader: ${LOADER_NAME} (Unity-IL2CPP)
+Wrapper: DeadEffect.sh
 READMEEOF
 
 mkdir -p port/DeadEffect/debug_analysis
