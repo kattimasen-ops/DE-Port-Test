@@ -7,6 +7,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <dlfcn.h>
+#include <signal.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
@@ -26,6 +27,10 @@
 #ifndef R_AARCH64_TLSDESC
 #define R_AARCH64_TLSDESC 1031
 #endif
+
+/* Vom Loader bereitgestellte Intercepts */
+extern int  de_sigaction(int, const struct sigaction *, struct sigaction *);
+extern void (*de_signal(int, void (*)(int)))(int);
 
 typedef struct {
     void *base;
@@ -53,10 +58,6 @@ static struct {
 } g_sym_cache[SYM_CACHE_SIZE];
 static int g_sym_cache_next = 0;
 
-/* Heap-Konsistenzpruefung auf Top-Chunk-Ebene.
- * Kleine Allokationen (16/256 B) landen im tcache und sehen
- * Top-Chunk-Korruption nicht. Eine 128-KB-Allokation kommt aus
- * dem Top-Chunk und zwingt glibc, die Metadaten zu validieren. */
 static int heap_sane_check(const char *when) {
     void *a = malloc(16);
     if (!a) { LOGE("  Heap-Check(%s): malloc(16) fehlgeschlagen", when); return 0; }
@@ -72,6 +73,11 @@ static int heap_sane_check(const char *when) {
 }
 
 static void *resolve_symbol_full(const char *name) {
+    /* --- Intercepts für libunity's Crash-Handler-Klau --- */
+    if (strcmp(name, "sigaction") == 0)  return (void *)de_sigaction;
+    if (strcmp(name, "signal")    == 0)  return (void *)de_signal;
+
+    /* --- Eigene Module durchsuchen --- */
     for (int i = 0; i < g_nmods; i++) {
         so_module *m = &g_modules[i];
         if (!m->symtab || !m->strtab) continue;
