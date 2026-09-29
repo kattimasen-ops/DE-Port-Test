@@ -1,4 +1,5 @@
-/* KEIN #define _GNU_SOURCE — kommt aus CFLAGS (-D_GNU_SOURCE). */
+/* KEIN #define _GNU_SOURCE mehr — kommt aus CFLAGS (-D_GNU_SOURCE).
+ * Sonst Re-Define-Warnung. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,90 +23,38 @@
 #define DEAD_EFFECT_LIBDIR "/roms/ports/DeadEffect/lib"
 #endif
 
+/* Aus so_util.h */
 extern void *so_load(const char *path);
 extern void *so_find_addr(void *handle, const char *name);
 extern int   so_is_our_handle(void *handle);
 
 /* ============================================================
- * Logging — direkt via write(2)
- *
- * WICHTIG: KEIN fprintf/vfprintf benutzen! glibc ruft intern
- * __vfprintf_chk auf, das wir (mit -rdynamic) selbst exportieren.
- * Das führt zu einer Endlos-Rekursion und Stack-Overflow.
- *
- * Stattdessen: snprintf in einen Stack-Buffer + write(2).
- * snprintf ist weniger kritisch, weil glibc's __snprintf_chk
- * nur von _FORTIFY_SOURCE-Code aufgerufen wird, und wir
- * überschreiben es nicht mehr.
+ * Logging
  * ============================================================ */
-static void log_write(const char *tag, const char *fmt, va_list ap) {
-    char buf[1024];
-    int n = 0;
-    if (tag && *tag) {
-        buf[n++] = '[';
-        for (const char *p = tag; *p && n < 200; p++) buf[n++] = *p;
-        buf[n++] = ']';
-        buf[n++] = ' ';
-    }
-    int remain = sizeof(buf) - n - 2;
-    if (remain > 0) {
-        int m = vsnprintf(buf + n, remain, fmt, ap);
-        if (m > 0) n += m;
-    }
-    if (n < (int)sizeof(buf) - 1) buf[n++] = '\n';
-    if (n > 0) {
-        ssize_t r = write(2, buf, n);
-        (void)r;
-    }
-}
-
 int __android_log_print(int prio, const char *tag, const char *fmt, ...) {
-    (void)prio;
     va_list ap; va_start(ap, fmt);
-    log_write(tag, fmt, ap);
-    va_end(ap);
-    return 0;
+    fprintf(stderr, "[%s] ", tag ? tag : "?");
+    int r = vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n"); va_end(ap); return r;
 }
 int __android_log_vprint(int prio, const char *tag, const char *fmt, va_list ap) {
-    (void)prio;
-    log_write(tag, fmt, ap);
-    return 0;
+    fprintf(stderr, "[%s] ", tag ? tag : "?");
+    int r = vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n"); return r;
 }
 int __android_log_write(int prio, const char *tag, const char *s) {
-    (void)prio;
-    char buf[1024];
-    int n = 0;
-    if (tag && *tag) {
-        buf[n++] = '[';
-        for (const char *p = tag; *p && n < 200; p++) buf[n++] = *p;
-        buf[n++] = ']';
-        buf[n++] = ' ';
-    }
-    if (s) {
-        for (const char *p = s; *p && n < (int)sizeof(buf) - 2; p++) buf[n++] = *p;
-    }
-    buf[n++] = '\n';
-    ssize_t r = write(2, buf, n);
-    (void)r;
-    return 0;
+    fprintf(stderr, "[%s] %s\n", tag ? tag : "?", s ? s : ""); return 0;
 }
 void __android_log_assert(const char *cond, const char *tag,
                           const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
-    log_write(tag, fmt, ap);
+    fprintf(stderr, "[ASSERT] %s: ", tag ? tag : "?");
+    vfprintf(stderr, fmt, ap);
+    fprintf(stderr, " (cond: %s)\n", cond ? cond : "?");
     va_end(ap);
-    if (cond) {
-        ssize_t r = write(2, " (assert failed)\n", 17);
-        (void)r;
-    }
 }
 void android_set_abort_message(const char *msg) {
-    if (msg) {
-        ssize_t r = write(2, msg, strlen(msg));
-        (void)r;
-        r = write(2, "\n", 1);
-        (void)r;
-    }
+    fprintf(stderr, "[android_abort] %s\n", msg ? msg : "(null)");
 }
 
 /* ============================================================
@@ -208,7 +157,8 @@ int UnitySendMessage(const char *obj, const char *method, const char *msg) {
     (void)obj; (void)method; (void)msg; return 0;
 }
 
-/* FIX: __sF muss die echten stdio-Handles enthalten. */
+/* FIX: __sF muss die echten stdio-Handles enthalten.
+ * Bionic-Code greift z.B. über __sF[1] auf stdout zu. */
 FILE *__sF[3];
 
 __attribute__((constructor))
@@ -267,6 +217,15 @@ int __FD_ISSET_chk(int fd, const fd_set *set, size_t set_size) {
     return 0;
 }
 
+/* FIX: glibc deklariert
+ *   extern long int __fdelt_chk (long int __d);
+ * in bits/select2.h. Rückgabetyp MUSS long int sein, sonst
+ * "conflicting types"-Fehler. */
+long int __fdelt_chk(long int d) {
+    if (d < 0 || d >= FD_SETSIZE) return 0;
+    return (long int)(d / __NFDBITS);
+}
+
 extern int __register_atfork(void (*prepare)(void),
                              void (*parent)(void),
                              void (*child)(void),
@@ -279,8 +238,43 @@ int pthread_atfork(void (*prepare)(void),
 
 /* ============================================================
  * dlopen/dlsym-Hook
+ *
+ * KRITISCH: NIEMALS dlsym(RTLD_NEXT, "dlsym") aus dem eigenen
+ * dlsym-Hook heraus aufrufen. Der PLT löst dlsym auf das Symbol
+ * im eigenen Executable auf (weil wir mit -rdynamic exportieren
+ * und die Exe zuerst in der Suchreihenfolge steht). Ergebnis:
+ * Endlosrekursion → Stack-Overflow → SIGSEGV.
+ *
+ * Lösung: dlvsym() (wird von uns NICHT gehookt) benutzen, um
+ * die echten Funktionen EINMAL per Konstruktor zu holen.
+ *
+ * Unity ruft dlopen("libil2cpp.so") selbst auf, nachdem es
+ * initJni ausgeführt hat. Wir fangen das ab und liefern das
+ * von so_load erzeugte Handle zurück.
  * ============================================================ */
+
+extern void *dlvsym(void *handle, const char *name, const char *version);
+
+static void *(*g_real_dlopen)(const char *, int) = NULL;
+static void *(*g_real_dlsym)(void *, const char *) = NULL;
+
+__attribute__((constructor))
+static void resolve_real_dl_functions(void) {
+    if (!g_real_dlopen) {
+        g_real_dlopen = (void *(*)(const char *, int))
+            dlvsym(RTLD_NEXT, "dlopen", "GLIBC_2.17");
+    }
+    if (!g_real_dlsym) {
+        g_real_dlsym = (void *(*)(void *, const char *))
+            dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.17");
+    }
+    fprintf(stderr, "[dl-hook] real_dlopen=%p real_dlsym=%p\n",
+            (void*)g_real_dlopen, (void*)g_real_dlsym);
+}
+
 void *dlopen(const char *name, int flags) {
+    if (!g_real_dlopen) resolve_real_dl_functions();
+
     if (name && strstr(name, "libil2cpp.so")) {
         static void *cached = NULL;
         if (!cached) {
@@ -291,47 +285,95 @@ void *dlopen(const char *name, int flags) {
                          DEAD_EFFECT_LIBDIR);
                 cached = so_load(full);
             }
-            char msg[128];
-            int n = snprintf(msg, sizeof(msg),
-                             "[dlopen-hook] libil2cpp.so -> %p\n", cached);
-            if (n > 0) {
-                ssize_t r = write(2, msg, n);
-                (void)r;
-            }
+            fprintf(stderr, "[dlopen-hook] libil2cpp.so -> %p\n", cached);
         }
         return cached;
     }
-    static void *(*real)(const char *, int) = NULL;
-    if (!real) real = dlsym(RTLD_NEXT, "dlopen");
-    return real ? real(name, flags) : NULL;
+    return g_real_dlopen ? g_real_dlopen(name, flags) : NULL;
 }
 
 void *dlsym(void *handle, const char *name) {
+    if (!g_real_dlsym) resolve_real_dl_functions();
+
     if (so_is_our_handle(handle)) {
-        void *p = so_find_addr(handle, name);
-        return p;
+        return so_find_addr(handle, name);
     }
-    static void *(*real)(void *, const char *) = NULL;
-    if (!real) real = dlsym(RTLD_NEXT, "dlsym");
-    return real ? real(handle, name) : NULL;
+    return g_real_dlsym ? g_real_dlsym(handle, name) : NULL;
 }
 
 /* ============================================================
- * Fortify (_chk) Wrapper — NUR die, die glibc NICHT hat.
- *
- * glibc hat bereits: __memcpy_chk, __memmove_chk, __memset_chk,
- * __strcpy_chk, __strncpy_chk, __strcat_chk, __strncat_chk,
- * __strlen_chk, __strchr_chk, __strrchr_chk, __snprintf_chk,
- * __vsnprintf_chk, __sprintf_chk, __vsprintf_chk, __printf_chk,
- * __fprintf_chk, __vfprintf_chk, __fdelt_chk.
- *
- * Wir definieren sie NICHT, sonst Rekursion in glibc.
- * Nur Bionic-spezifische Wrapper bleiben:
+ * Fortify (_chk) Wrapper
  * ============================================================ */
-
-/* Bionic-spezifisch: __strncpy_chk2 wird nur von Android-Code
- * referenziert. glibc hat es nicht. */
+void *__memcpy_chk(void *dst, const void *src, size_t n, size_t dstlen) {
+    (void)dstlen; return memcpy(dst, src, n);
+}
+void *__memmove_chk(void *dst, const void *src, size_t n, size_t dstlen) {
+    (void)dstlen; return memmove(dst, src, n);
+}
+void *__memset_chk(void *dst, int c, size_t n, size_t dstlen) {
+    (void)dstlen; return memset(dst, c, n);
+}
+char *__strcpy_chk(char *dst, const char *src, size_t dstlen) {
+    (void)dstlen; return strcpy(dst, src);
+}
+char *__strncpy_chk(char *dst, const char *src, size_t n, size_t dstlen) {
+    (void)dstlen; return strncpy(dst, src, n);
+}
 char *__strncpy_chk2(char *dst, const char *src, size_t n,
                      size_t dstlen, size_t srclen) {
     (void)dstlen; (void)srclen; return strncpy(dst, src, n);
+}
+char *__strcat_chk(char *dst, const char *src, size_t dstlen) {
+    (void)dstlen; return strcat(dst, src);
+}
+char *__strncat_chk(char *dst, const char *src, size_t n, size_t dstlen) {
+    (void)dstlen; return strncat(dst, src, n);
+}
+size_t __strlen_chk(const char *s, size_t slen) {
+    (void)slen; return strlen(s);
+}
+char *__strchr_chk(const char *s, int c, size_t slen) {
+    (void)slen; return strchr(s, c);
+}
+char *__strrchr_chk(const char *s, int c, size_t slen) {
+    (void)slen; return strrchr(s, c);
+}
+int __snprintf_chk(char *s, size_t maxlen, int flag, size_t slen,
+                   const char *fmt, ...) {
+    (void)flag; (void)slen;
+    va_list ap; va_start(ap, fmt);
+    int r = vsnprintf(s, maxlen, fmt, ap);
+    va_end(ap); return r;
+}
+int __vsnprintf_chk(char *s, size_t maxlen, int flag, size_t slen,
+                    const char *fmt, va_list ap) {
+    (void)flag; (void)slen;
+    return vsnprintf(s, maxlen, fmt, ap);
+}
+int __sprintf_chk(char *s, int flag, size_t slen, const char *fmt, ...) {
+    (void)flag; (void)slen;
+    va_list ap; va_start(ap, fmt);
+    int r = vsprintf(s, fmt, ap);
+    va_end(ap); return r;
+}
+int __vsprintf_chk(char *s, int flag, size_t slen,
+                   const char *fmt, va_list ap) {
+    (void)flag; (void)slen;
+    return vsprintf(s, fmt, ap);
+}
+int __printf_chk(int flag, const char *fmt, ...) {
+    (void)flag;
+    va_list ap; va_start(ap, fmt);
+    int r = vprintf(fmt, ap);
+    va_end(ap); return r;
+}
+int __fprintf_chk(FILE *stream, int flag, const char *fmt, ...) {
+    (void)flag;
+    va_list ap; va_start(ap, fmt);
+    int r = vfprintf(stream, fmt, ap);
+    va_end(ap); return r;
+}
+int __vfprintf_chk(FILE *stream, int flag, const char *fmt, va_list ap) {
+    (void)flag;
+    return vfprintf(stream, fmt, ap);
 }
