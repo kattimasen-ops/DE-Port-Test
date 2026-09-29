@@ -81,7 +81,25 @@ static void crash_write_dec(int v) {
     crash_write(o);
 }
 
-/* Stack-Dump: 16 Zeilen à 4 Wörter (32 Bytes pro Zeile) ab SP. */
+/* Kopiert eine Textdatei (z. B. /proc/self/maps) in crash.txt. */
+static void crash_dump_file(const char *path, const char *header) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        crash_write(header);
+        crash_write("(nicht lesbar)\n");
+        return;
+    }
+    crash_write(header);
+    char buf[1024];
+    ssize_t n;
+    while ((n = read(fd, buf, sizeof(buf) - 1)) > 0) {
+        buf[n] = 0;
+        crash_write(buf);
+    }
+    close(fd);
+    crash_write("\n");
+}
+
 static void crash_dump_stack(uint64_t sp) {
     if (!sp || sp < 0x1000 || (sp & 7) != 0) return;
     crash_write("### STACK DUMP (SP to SP+512) ###\n");
@@ -99,10 +117,7 @@ static void crash_dump_stack(uint64_t sp) {
         buf[n++] = ':';
         for (int w = 0; w < 4; w++) {
             buf[n++] = ' ';
-            uint64_t v = 0;
-            /* Sicher lesen — falls SP+512 über Seitengrenze geht, wird das
-             * höchstens einen zweiten Fault auslösen. Das ist akzeptabel. */
-            v = p[i * 4 + w];
+            uint64_t v = p[i * 4 + w];
             buf[n++] = '0'; buf[n++] = 'x';
             for (int b = 15; b >= 0; b--) {
                 buf[n++] = hx[(v >> (b * 4)) & 0xF];
@@ -164,6 +179,14 @@ static void crash_handler(int sig, siginfo_t *info, void *uctx) {
 
     crash_dump_stack((uint64_t)uc->uc_mcontext.sp);
 
+    /* Thread-Name */
+    char tpath[64];
+    snprintf(tpath, sizeof(tpath), "/proc/self/task/%d/comm", tid);
+    crash_dump_file(tpath, "### THREAD COMM ###\n");
+
+    /* Memory-Map für Adress-Auflösung */
+    crash_dump_file("/proc/self/maps", "### /proc/self/maps ###\n");
+
     crash_write("### END (handler) ###\n");
     _exit(128 + sig);
 }
@@ -204,6 +227,7 @@ static void verify_sigsegv_handler(const char *where) {
 
 static void *crash_handler_watchdog(void *arg) {
     (void)arg;
+    pthread_setname_np(pthread_self(), "DEWatchdog");
     for (;;) {
         install_crash_handler();
         usleep(2000);
@@ -387,6 +411,7 @@ static void arm_crash_handler(const char *what) {
 
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
+    pthread_setname_np(pthread_self(), "DEMain");
     rawlog("[boot] main() entered\n");
 
     prctl(PR_SET_DUMPABLE, 1, 0, 0, 0);
