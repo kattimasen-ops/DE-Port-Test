@@ -25,7 +25,19 @@ jobs:
             curl \
             jq \
             xxd \
-            ripgrep
+            ripgrep \
+            pax-utils \
+            radare2
+
+          pip3 install --quiet lief
+
+      - name: Verify Tools
+        run: |
+          echo "=== Tool-Versionen ==="
+          aarch64-linux-gnu-objdump --version | head -1
+          rabin2 -v 2>&1 | head -1 || true
+          scanelf --version 2>&1 | head -1 || true
+          python3 -c "import lief; print('LIEF', lief.__version__)" || true
 
       - name: Download Dead Effect Libs
         run: |
@@ -38,10 +50,8 @@ jobs:
           if [ -f /tmp/arm64-v8a.zip ]; then
             echo "Download erfolgreich: $(stat -c%s /tmp/arm64-v8a.zip) Bytes"
             unzip -o /tmp/arm64-v8a.zip -d /tmp/de_libs/
-            echo "=== Entpackte Struktur ==="
             find /tmp/de_libs/ -type f
 
-            # Kopiere alle relevanten Dateien
             find /tmp/de_libs/ -name "libunity.so"      -exec cp {} analysis/deadeffect/ \;
             find /tmp/de_libs/ -name "libil2cpp.so"     -exec cp {} analysis/deadeffect/ \;
             find /tmp/de_libs/ -name "libmain.so"       -exec cp {} analysis/deadeffect/ \;
@@ -51,7 +61,10 @@ jobs:
             exit 1
           fi
 
-      - name: "Analyse: libmain.so"
+      # ============================================================
+      # PHASE 1: Basis-Analyse mit binutils (readelf, nm, objdump)
+      # ============================================================
+      - name: "Phase 1: libmain.so – Basis-Analyse"
         run: |
           mkdir -p analysis/libmain
           LIB="analysis/deadeffect/libmain.so"
@@ -59,20 +72,18 @@ jobs:
             file "$LIB" > analysis/libmain/file.txt
             readelf -h "$LIB" > analysis/libmain/elf_header.txt 2>&1
             readelf -d "$LIB" > analysis/libmain/dynamic.txt 2>&1
-            readelf -s "$LIB" > analysis/libmain/symbols_all.txt 2>&1
-            readelf -sW "$LIB" | grep -E "FUNC|OBJECT" > analysis/libmain/symbols_filtered.txt 2>&1
+            readelf -sW "$LIB" > analysis/libmain/symbols_all.txt 2>&1
+            readelf -rW "$LIB" > analysis/libmain/relocations.txt 2>&1
             nm -D "$LIB" > analysis/libmain/nm_dynamic.txt 2>&1
             nm "$LIB"   > analysis/libmain/nm_all.txt 2>&1
             strings -a "$LIB" > analysis/libmain/strings_all.txt 2>&1
 
-            # Disassembly der gesamten libmain.so (klein)
             aarch64-linux-gnu-objdump -d "$LIB" > analysis/libmain/disasm_full.txt 2>&1
-
-            # JNI_OnLoad und Registrierung finden
-            grep -n "JNI_OnLoad\|RegisterNatives\|FindClass\|GetMethodID" analysis/libmain/disasm_full.txt > analysis/libmain/disasm_jni_hits.txt 2>&1 || true
+            grep -n "JNI_OnLoad\|RegisterNatives\|FindClass\|GetMethodID" \
+              analysis/libmain/disasm_full.txt > analysis/libmain/disasm_jni_hits.txt 2>&1 || true
           fi
 
-      - name: "Analyse: libunity.so – Symbole & Struktur"
+      - name: "Phase 1: libunity.so – Basis-Analyse"
         run: |
           mkdir -p analysis/libunity
           LIB="analysis/deadeffect/libunity.so"
@@ -81,89 +92,52 @@ jobs:
             readelf -h "$LIB" > analysis/libunity/elf_header.txt 2>&1
             readelf -d "$LIB" > analysis/libunity/dynamic.txt 2>&1
             readelf -l "$LIB" > analysis/libunity/program_headers.txt 2>&1
-            readelf -S "$LIB" > analysis/libunity/section_headers.txt 2>&1
+            readelf -SW "$LIB" > analysis/libunity/section_headers.txt 2>&1
             readelf -sW "$LIB" > analysis/libunity/symbols_all.txt 2>&1
             readelf -rW "$LIB" > analysis/libunity/relocations.txt 2>&1
             nm -D "$LIB" > analysis/libunity/nm_dynamic.txt 2>&1
             nm "$LIB"   > analysis/libunity/nm_all.txt 2>&1
 
-            # Alle exportierten Symbole
-            aarch64-linux-gnu-readelf -sW "$LIB" | grep -E "FUNC.*GLOBAL.*DEFAULT" | sort > analysis/libunity/symbols_exported.txt 2>&1
-            # Alle importierten (undefinierten) Symbole
-            aarch64-linux-gnu-readelf -sW "$LIB" | grep -E "UND" | sort > analysis/libunity/symbols_imported.txt 2>&1
+            aarch64-linux-gnu-readelf -sW "$LIB" | grep -E "FUNC.*GLOBAL.*DEFAULT" | sort \
+              > analysis/libunity/symbols_exported.txt 2>&1
+            aarch64-linux-gnu-readelf -sW "$LIB" | grep -E "UND" | sort \
+              > analysis/libunity/symbols_imported.txt 2>&1
 
-            # Symbole zählen
             echo "=== Symbol-Statistik ===" > analysis/libunity/symbol_stats.txt
             echo "Alle Symbole: $(wc -l < analysis/libunity/symbols_all.txt)" >> analysis/libunity/symbol_stats.txt
             echo "Exportiert:    $(wc -l < analysis/libunity/symbols_exported.txt)" >> analysis/libunity/symbol_stats.txt
             echo "Importiert:    $(wc -l < analysis/libunity/symbols_imported.txt)" >> analysis/libunity/symbol_stats.txt
-          fi
 
-      - name: "Analyse: libunity.so – Native Methoden (Strings)"
-        run: |
-          LIB="analysis/deadeffect/libunity.so"
-          if [ -f "$LIB" ]; then
-            # Alle nativen Unity-Methoden aus den Strings
+            strings -a "$LIB" > analysis/libunity/strings_all.txt 2>&1
             strings -a "$LIB" | grep -E "^native[A-Z]|^nOn|^init[A-Z]|^deinit[A-Z]|^setVr|^isQuiting|^onAudio|^initializeARCore|^pauseARCore|^resumeARCore" \
               | sort -u > analysis/libunity/strings_native_methods.txt
-
-            # Alle UnityPlayer-Klassen
             strings -a "$LIB" | grep -E "^com/unity3d/player/" | sort -u > analysis/libunity/strings_unity_classes.txt
-
-            # Alle JNI-Klassen
             strings -a "$LIB" | grep -E "^com/google/androidgamesdk/|^bitter/jnibridge/|^android/" \
               | sort -u > analysis/libunity/strings_jni_classes.txt
-
-            # JNI-Signaturen (typisch: "(II)V" etc.)
             strings -a "$LIB" | grep -E "^\(.*\)[VZBCSIJFD]|^\(.*\)L" | sort -u > analysis/libunity/strings_signatures.txt
-
-            # Alle RegisterNatives-relevanten Strings
-            strings -a "$LIB" | grep -iE "RegisterNatives|FindClass|GetMethodID|GetStaticMethodID" \
-              | sort -u > analysis/libunity/strings_jni_api.txt
           fi
 
-      - name: "Analyse: libunity.so – Disassembly der nativen Methoden"
+      - name: "Phase 1: libunity.so – Disassembly der nativen Methoden"
+        continue-on-error: true
         run: |
           LIB="analysis/deadeffect/libunity.so"
           if [ ! -f "$LIB" ]; then exit 0; fi
 
-          # Liste der nativen Methoden
-          NATIVE_METHODS="nativeSendSurfaceChangedEvent nativeRecreateGfxState nativeFocusChanged nativeResume nativePause nativeDone nativeLowMemory nativeApplicationUnload nativeInjectEvent nativeUnitySendMessage nativeSetInputArea nativeSetKeyboardIsVisible nativeSetInputString nativeSetInputSelection nativeSoftInputClosed nativeSoftInputCanceled nativeSoftInputLostFocus nativeReportKeyboardConfigChanged nativeRestartActivityIndicator nativeSetLaunchURL nativeOrientationChanged nativeIsAutorotationOn nativeMuteMasterAudio nativeFrameReady nativeSurfaceTextureReady nOnChoreographer nOnRefreshRateChanged nSetSupportedRefreshRates initializeARCore pauseARCore resumeARCore initVrJni setVrVideoTransform isQuiting initCamera2Jni deinitCamera2Jni initHFPStatusJni deinitHFPStatusJni onAudioVolumeChanged"
+          NATIVE_METHODS="nativeSendSurfaceChangedEvent nativeRecreateGfxState nativeFocusChanged nativeResume nativePause nativeDone nativeLowMemory nativeApplicationUnload nativeInjectEvent nativeUnitySendMessage nativeSetInputArea nativeSetKeyboardIsVisible nativeSetInputString nativeSetInputSelection nativeSoftInputClosed nativeSoftInputCanceled nativeSoftInputLostFocus nativeReportKeyboardConfigChanged nativeRestartActivityIndicator nativeSetLaunchURL nativeOrientationChanged nativeIsAutorotationOn nativeMuteMasterAudio nativeFrameReady nativeSurfaceTextureReady nOnChoreographer nOnRefreshRateChanged nSetSupportedRefreshRates initializeARCore pauseARCore resumeARCore initVrJni setVrVideoTransform isQuiting initCamera2Jni deinitCamera2Jni initHFPStatusJni deinitHFPStatusJni onAudioVolumeChanged JNI_OnLoad RegisterNatives"
 
           for SYM in $NATIVE_METHODS; do
-            # Suche die Adresse des Symbols in der dynamischen Symboltabelle
-            ADDR=$(aarch64-linux-gnu-readelf -sW "$LIB" | grep -i " $SYM" | head -1 | awk '{print $2}')
-            if [ -z "$ADDR" ] || [ "$ADDR" = "0" ]; then
-              continue
-            fi
-            # Entferne 0x-Präfix falls vorhanden, konvertiere zu dezimal
-            ADDR_HEX=$(echo "$ADDR" | sed 's/0x//')
-            ADDR_DEC=$((16#$ADDR_HEX))
-
-            START=$(printf "0x%x" $((ADDR_DEC - 128)))
-            STOP=$(printf  "0x%x" $((ADDR_DEC + 1024)))
-
-            aarch64-linux-gnu-objdump -d --start-address=$START --stop-address=$STOP "$LIB" \
-              > "analysis/libunity/disasm_${SYM}.txt" 2>&1 || true
-          done
-
-          # Auch die exportierten JNI_OnLoad- und RegisterNatives-Bereiche
-          for SYM in JNI_OnLoad RegisterNatives; do
             ADDR=$(aarch64-linux-gnu-readelf -sW "$LIB" | grep -i " $SYM" | head -1 | awk '{print $2}')
             if [ -z "$ADDR" ] || [ "$ADDR" = "0" ]; then continue; fi
             ADDR_HEX=$(echo "$ADDR" | sed 's/0x//')
             ADDR_DEC=$((16#$ADDR_HEX))
             START=$(printf "0x%x" $((ADDR_DEC - 128)))
-            STOP=$(printf  "0x%x" $((ADDR_DEC + 2048)))
+            STOP=$(printf  "0x%x" $((ADDR_DEC + 1024)))
             aarch64-linux-gnu-objdump -d --start-address=$START --stop-address=$STOP "$LIB" \
               > "analysis/libunity/disasm_${SYM}.txt" 2>&1 || true
           done
+          ls -la analysis/libunity/disasm_*.txt 2>/dev/null | head -50 || true
 
-          echo "Disassembly-Dateien erstellt:"
-          ls -la analysis/libunity/disasm_*.txt 2>/dev/null | head -50
-        continue-on-error: true
-
-      - name: "Analyse: libil2cpp.so – Symbole & Struktur"
+      - name: "Phase 1: libil2cpp.so – Basis-Analyse"
         run: |
           mkdir -p analysis/libil2cpp
           LIB="analysis/deadeffect/libil2cpp.so"
@@ -172,47 +146,147 @@ jobs:
             readelf -h "$LIB" > analysis/libil2cpp/elf_header.txt 2>&1
             readelf -d "$LIB" > analysis/libil2cpp/dynamic.txt 2>&1
             readelf -l "$LIB" > analysis/libil2cpp/program_headers.txt 2>&1
-            readelf -S "$LIB" > analysis/libil2cpp/section_headers.txt 2>&1
+            readelf -SW "$LIB" > analysis/libil2cpp/section_headers.txt 2>&1
             readelf -sW "$LIB" > analysis/libil2cpp/symbols_all.txt 2>&1
             readelf -rW "$LIB" > analysis/libil2cpp/relocations.txt 2>&1
             nm -D "$LIB" > analysis/libil2cpp/nm_dynamic.txt 2>&1
             nm "$LIB"   > analysis/libil2cpp/nm_all.txt 2>&1
             strings -a "$LIB" > analysis/libil2cpp/strings_all.txt 2>&1
 
-            # Statistik
             echo "=== Symbol-Statistik ===" > analysis/libil2cpp/symbol_stats.txt
             echo "Alle Symbole: $(wc -l < analysis/libil2cpp/symbols_all.txt)" >> analysis/libil2cpp/symbol_stats.txt
-          fi
 
-      - name: "Analyse: libil2cpp.so – IL2CPP-relevante Strings"
-        run: |
-          LIB="analysis/deadeffect/libil2cpp.so"
-          if [ -f "$LIB" ]; then
-            # Alle il2cpp_* Strings
             strings -a "$LIB" | grep -iE "il2cpp|unity|mono|metadata" | sort -u > analysis/libil2cpp/strings_il2cpp.txt
-
-            # Alle Methodennamen (typisch: ns__Class__Method)
             strings -a "$LIB" | grep -E "^[a-zA-Z_][a-zA-Z0-9_]*__[a-zA-Z0-9_]+$" | sort -u > analysis/libil2cpp/strings_methods.txt
-
-            # Alle nativen Methoden
             strings -a "$LIB" | grep -E "^native[A-Z]|^nOn|^init[A-Z]|^deinit[A-Z]" | sort -u > analysis/libil2cpp/strings_native_methods.txt
           fi
 
-      - name: "Analyse: ELF-Vergleich (libunity vs libil2cpp)"
+      # ============================================================
+      # PHASE 2: Erweiterte ELF-Analyse mit pax-utils
+      # ============================================================
+      - name: "Phase 2: pax-utils – scanelf & dumpelf"
+        continue-on-error: true
         run: |
-          {
-            echo "=== ELF-HEADER: libunity.so ==="
-            cat analysis/libunity/elf_header.txt 2>/dev/null
-            echo ""
-            echo "=== ELF-HEADER: libil2cpp.so ==="
-            cat analysis/libil2cpp/elf_header.txt 2>/dev/null
-          } > analysis/elf_comparison.txt
+          mkdir -p analysis/paxutils
+          for LIB in libunity libil2cpp libmain; do
+            SRC="analysis/deadeffect/${LIB}.so"
+            if [ -f "$SRC" ]; then
+              echo "=== scanelf -a -s ${LIB} ===" > analysis/paxutils/${LIB}_scanelf.txt
+              scanelf -a -s "$SRC" >> analysis/paxutils/${LIB}_scanelf.txt 2>&1 || true
 
-      - name: "Analyse: Gesamt-Zusammenfassung"
+              echo "=== dumpelf ${LIB} ===" > analysis/paxutils/${LIB}_dumpelf.txt
+              dumpelf "$SRC" >> analysis/paxutils/${LIB}_dumpelf.txt 2>&1 || true
+
+              echo "=== scanelf -n (DT_NEEDED) ${LIB} ===" > analysis/paxutils/${LIB}_needed.txt
+              scanelf -n "$SRC" >> analysis/paxutils/${LIB}_needed.txt 2>&1 || true
+            fi
+          done
+
+      # ============================================================
+      # PHASE 3: LIEF – Detaillierte ELF-Analyse via Python
+      # ============================================================
+      - name: "Phase 3: LIEF – ELF-Struktur, Symbole, Relocations"
+        continue-on-error: true
+        run: |
+          mkdir -p analysis/lief
+          python3 << 'PYEOF'
+import lief
+import os
+
+libs = ['libunity', 'libil2cpp', 'libmain']
+for lib in libs:
+    path = f'analysis/deadeffect/{lib}.so'
+    if not os.path.exists(path):
+        continue
+    binary = lief.parse(path)
+    if not binary:
+        continue
+
+    with open(f'analysis/lief/{lib}.txt', 'w') as f:
+        f.write(f'=== {lib}.so ===\n')
+        f.write(f'Format:           {binary.format}\n')
+        f.write(f'Architecture:     {binary.header.machine_type}\n')
+        f.write(f'Entrypoint:       0x{binary.entrypoint:x}\n')
+        f.write(f'Is PIC:           {binary.is_pic}\n')
+        f.write(f'Sections:         {len(binary.sections)}\n')
+        f.write(f'Segments:         {len(binary.segments)}\n')
+        f.write(f'Dynamic Symbols:  {len(binary.dynamic_symbols)}\n')
+        f.write(f'Imported Functions: {len(binary.imported_functions)}\n')
+        f.write(f'Exported Functions: {len(binary.exported_functions)}\n')
+
+        f.write('\n=== Sections ===\n')
+        for s in binary.sections:
+            f.write(f'{s.name:30s} addr=0x{s.virtual_address:08x} size={s.size:10d} type={s.type}\n')
+
+        f.write('\n=== Segments ===\n')
+        for seg in binary.segments:
+            f.write(f'type={seg.type} flags={seg.flags} vaddr=0x{seg.virtual_address:08x} '
+                    f'vsize={seg.virtual_size} fsize={seg.physical_size}\n')
+
+        f.write('\n=== Imported Functions ===\n')
+        for imp in binary.imported_functions:
+            f.write(f'{imp}\n')
+
+        f.write('\n=== Exported Functions ===\n')
+        for exp in binary.exported_functions:
+            f.write(f'{exp}\n')
+
+        f.write('\n=== Dynamic Symbols (erste 500) ===\n')
+        for sym in list(binary.dynamic_symbols)[:500]:
+            f.write(f'{sym.name}  value=0x{sym.value:x}  size={sym.size}  '
+                    f'type={sym.type}  binding={sym.binding}  visibility={sym.visibility}\n')
+PYEOF
+
+      # ============================================================
+      # PHASE 4: radare2 – Symbole, Imports, Funktionen
+      # ============================================================
+      - name: "Phase 4: radare2 – rabin2 Symbole, Imports, Exports"
+        continue-on-error: true
+        run: |
+          mkdir -p analysis/radare2
+          for LIB in libunity libil2cpp libmain; do
+            SRC="analysis/deadeffect/${LIB}.so"
+            if [ -f "$SRC" ]; then
+              rabin2 -s "$SRC" > analysis/radare2/${LIB}_symbols.txt 2>&1 || true
+              rabin2 -i "$SRC" > analysis/radare2/${LIB}_imports.txt 2>&1 || true
+              rabin2 -E "$SRC" > analysis/radare2/${LIB}_exports.txt 2>&1 || true
+              rabin2 -l "$SRC" > analysis/radare2/${LIB}_libraries.txt 2>&1 || true
+              rabin2 -S "$SRC" > analysis/radare2/${LIB}_sections.txt 2>&1 || true
+              rabin2 -z "$SRC" > analysis/radare2/${LIB}_strings.txt 2>&1 || true
+            fi
+          done
+
+      - name: "Phase 4: radare2 – Funktionsanalyse (libil2cpp)"
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          SRC="analysis/deadeffect/libil2cpp.so"
+          if [ -f "$SRC" ]; then
+            # aaa = analyze all (functions, references, calls)
+            # afl = list all functions
+            r2 -q -c "aaa; afl" "$SRC" > analysis/radare2/libil2cpp_functions.txt 2>&1 || true
+            echo "Funktionen in libil2cpp: $(wc -l < analysis/radare2/libil2cpp_functions.txt)"
+          fi
+
+      - name: "Phase 4: radare2 – Funktionsanalyse (libunity)"
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          SRC="analysis/deadeffect/libunity.so"
+          if [ -f "$SRC" ]; then
+            r2 -q -c "aaa; afl" "$SRC" > analysis/radare2/libunity_functions.txt 2>&1 || true
+            echo "Funktionen in libunity: $(wc -l < analysis/radare2/libunity_functions.txt)"
+          fi
+
+      # ============================================================
+      # PHASE 5: Vergleich & Zusammenfassung
+      # ============================================================
+      - name: "Phase 5: ELF-Vergleich & Zusammenfassung"
+        continue-on-error: true
         run: |
           {
             echo "=========================================="
-            echo "  DEAD EFFECT ANALYSE – ZUSAMMENFASSUNG"
+            echo "  DEAD EFFECT – ANALYSE-ZUSAMMENFASSUNG"
             echo "=========================================="
             echo ""
             echo "=== libunity.so ==="
@@ -220,21 +294,31 @@ jobs:
             echo "Exportierte Symbole: $(wc -l < analysis/libunity/symbols_exported.txt 2>/dev/null)"
             echo "Importierte Symbole: $(wc -l < analysis/libunity/symbols_imported.txt 2>/dev/null)"
             echo ""
-            echo "Native Methoden (Strings):"
+            echo "--- Native Methoden (Strings) ---"
             cat analysis/libunity/strings_native_methods.txt 2>/dev/null
             echo ""
-            echo "UnityPlayer-Klassen:"
+            echo "--- UnityPlayer-Klassen ---"
             cat analysis/libunity/strings_unity_classes.txt 2>/dev/null
             echo ""
-            echo "JNI-Klassen:"
+            echo "--- JNI-Klassen ---"
             cat analysis/libunity/strings_jni_classes.txt 2>/dev/null
+            echo ""
+            echo "--- Importierte (unaufgelöste) Symbole (erste 80) ---"
+            head -80 analysis/libunity/symbols_imported.txt 2>/dev/null
             echo ""
             echo "=== libil2cpp.so ==="
             echo "Dateigröße: $(stat -c%s analysis/deadeffect/libil2cpp.so 2>/dev/null) Bytes"
-            echo "IL2CPP-Strings:"
-            head -50 analysis/libil2cpp/strings_il2cpp.txt 2>/dev/null
+            echo "Symbole: $(wc -l < analysis/libil2cpp/symbols_all.txt 2>/dev/null)"
+            echo ""
+            echo "--- IL2CPP-Strings (erste 40) ---"
+            head -40 analysis/libil2cpp/strings_il2cpp.txt 2>/dev/null
+            echo ""
+            echo "=== LIEF: Imported Functions libunity ==="
+            grep -A 100 "=== Imported Functions ===" analysis/lief/libunity.txt 2>/dev/null | head -60
+            echo ""
+            echo "=== radare2: libunity Imports ==="
+            head -60 analysis/radare2/libunity_imports.txt 2>/dev/null
           } > analysis/summary.txt
-        continue-on-error: true
 
       - name: "Upload Analysis Results"
         uses: actions/upload-artifact@v4
@@ -255,8 +339,11 @@ jobs:
           echo "=== libunity.so – UnityPlayer-Klassen ==="
           cat analysis/libunity/strings_unity_classes.txt 2>/dev/null || echo "(keine)"
           echo ""
-          echo "=== libunity.so – Importierte Symbole (unresolved) ==="
-          cat analysis/libunity/symbols_imported.txt 2>/dev/null | head -60 || echo "(keine)"
+          echo "=== libunity.so – Importierte Symbole (erste 60) ==="
+          head -60 analysis/libunity/symbols_imported.txt 2>/dev/null || echo "(keine)"
           echo ""
-          echo "=== libil2cpp.so – IL2CPP-Strings ==="
-          head -30 analysis/libil2cpp/strings_il2cpp.txt 2>/dev/null || echo "(keine)"
+          echo "=== LIEF: Imported Functions libunity ==="
+          grep -A 100 "=== Imported Functions ===" analysis/lief/libunity.txt 2>/dev/null | head -40 || echo "(keine)"
+          echo ""
+          echo "=== radare2: libunity Imports ==="
+          head -40 analysis/radare2/libunity_imports.txt 2>/dev/null || echo "(keine)"
