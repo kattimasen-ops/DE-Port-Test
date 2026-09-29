@@ -148,7 +148,7 @@ static void install_crash_handler(void) {
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = crash_handler;
-    sa.sa_flags     = SA_SIGINFO | SA_ONSTACK;  /* KEIN SA_RESETHAND */
+    sa.sa_flags     = SA_SIGINFO | SA_ONSTACK;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, NULL);
     sigaction(SIGBUS,  &sa, NULL);
@@ -157,13 +157,11 @@ static void install_crash_handler(void) {
     sigaction(SIGABRT, &sa, NULL);
 }
 
-/* Watchdog: installiert den Handler alle 10 ms neu, weil libunity ihn
- * waehrend nativeSendSurfaceChangedEvent ueberschreibt. */
 static void *crash_handler_watchdog(void *arg) {
     (void)arg;
     for (;;) {
         install_crash_handler();
-        usleep(10000);  /* 10 ms */
+        usleep(10000);
     }
     return NULL;
 }
@@ -178,20 +176,20 @@ void *g_libmain_handle   = NULL;
 void *g_libunity_handle  = NULL;
 void *g_libil2cpp_handle = NULL;
 
-/* ---------------------------------------------------------------------
+/* -----------------------------------------------------------------
  * Fake UnityPlayer-Objekt (dient als `thiz` fuer alle nativen Methoden)
  *
  * Wichtig: Der erste 8-Byte-Block eines Java-Objekts ist normalerweise
  * der Zeiger auf die Klasse (object header). libunity liest diesen
  * Header bei manchen Methoden aus. `class_ref` wird deshalb auf einen
  * stabilen, nicht-NULL Zeiger gesetzt.
- * ------------------------------------------------------------------- */
+ * ----------------------------------------------------------------- */
 static struct {
     void *class_ref;
     uint8_t payload[512];
 } g_fake_unity_player_obj = {0};
 
-static void *g_unity_player_thiz = &g_fake_unity_player_obj;
+void *g_unity_player_thiz = &g_fake_unity_player_obj;
 
 typedef int  (*JNI_OnLoad_t)(void *vm, void *reserved);
 typedef void (*initJni_t)(void *, void *, void *);
@@ -337,21 +335,19 @@ static int load_module_chain(void) {
     }
 
     /* -----------------------------------------------------------------
-     * FIX: initJni MUSS mit einem gueltigen `thiz` aufgerufen werden.
+     * FIX: initJni MUSS mit ZWEI gueltigen Objekten aufgerufen werden.
      *
-     * In der echten Android-Runtime ist `thiz` das UnityPlayer-Java-Objekt.
-     * libunity speichert diesen Zeiger intern und dereferenziert ihn spaeter
-     * in nativeSendSurfaceChangedEvent / nativeFocusChanged usw.
+     * Belegt durch DT-Disassembly (c728-c74c):
+     *   initJni(env, activity, activity)
      *
-     * Bisher: unity_init_jni(env, NULL, NULL)  -> interner Zeiger = NULL
-     *         -> SIGSEGV in nativeSendSurfaceChangedEvent.
-     *
-     * Jetzt:  unity_init_jni(env, g_unity_player_thiz, NULL)
-     *         -> interner Zeiger = g_fake_unity_player_obj (512+ Bytes)
+     * In der echten Android-Runtime ist thiz das UnityPlayer-Objekt
+     * und context die Activity. In der Fake-Umgebung duerfen beide
+     * gleich sein, aber KEINES darf NULL sein.
      * ----------------------------------------------------------------- */
     void *env = jni_get_env();
-    LOGI("Rufe initJni(env=%p, thiz=%p, NULL)", env, g_unity_player_thiz);
-    unity_init_jni(env, g_unity_player_thiz, NULL);
+    LOGI("Rufe initJni(env=%p, thiz=%p, context=%p)",
+         env, g_unity_player_thiz, g_unity_player_thiz);
+    unity_init_jni(env, g_unity_player_thiz, g_unity_player_thiz);
     LOGI("initJni OK");
     return 0;
 }
@@ -371,13 +367,9 @@ int main(int argc, char **argv) {
     LOGI("  assets = %s", DEAD_EFFECT_ASSETS);
 
     jni_shim_init();
-    rawlog("[boot] jni_shim_init done\n");
+    jni_install_android_contract();
+    rawlog("[boot] jni_shim_init + contract done\n");
 
-    /* -----------------------------------------------------------------
-     * Fake-UnityPlayer-Objekt vorbereiten:
-     *   class_ref = Zeiger auf das Objekt selbst, damit Unitys
-     *   Object-Header-Check (erste 8 Bytes) nicht auf NULL trifft.
-     * ----------------------------------------------------------------- */
     g_fake_unity_player_obj.class_ref = &g_fake_unity_player_obj;
     LOGI("Fake-UnityPlayer-Objekt vorbereitet: thiz=%p class_ref=%p",
          g_unity_player_thiz, g_fake_unity_player_obj.class_ref);
@@ -406,7 +398,7 @@ int main(int argc, char **argv) {
 
     LOGI("g_unity_player_thiz = %p (statisches Objekt, 512+ Bytes)", g_unity_player_thiz);
 
-    /* === TESTLAUF: nativeSendSurfaceChangedEvent jetzt wieder aktiviert === */
+    /* === nativeSendSurfaceChangedEvent === */
     if (unity_native_surface_changed) {
         arm_crash_handler("nativeSendSurfaceChangedEvent");
         LOGI("Rufe nativeSendSurfaceChangedEvent(env=%p, thiz=%p, 640, 480)",
@@ -455,6 +447,10 @@ int main(int argc, char **argv) {
             if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE) running = 0;
             jni_shim_handle_sdl_event(&ev);
         }
+
+        /* UI-Task-Pump VOR jedem Render-Frame (HandlerThread-Emulation) */
+        jni_pump_ui_tasks();
+
         if (unity_native_render && env) {
             arm_crash_handler("nativeRender");
             LOGI("render frame %d — rufe nativeRender(env=%p, thiz=%p) ...",
