@@ -345,4 +345,144 @@ static int load_module_chain(void) {
     }
 
     void *env = jni_get_env();
-    LOGI("Rufe initJni(env=%
+    LOGI("Rufe initJni(env=%p, thiz=%p, context=%p)",
+         env, g_unity_player_thiz, g_unity_player_thiz);
+    unity_init_jni(env, g_unity_player_thiz, g_unity_player_thiz);
+    LOGI("initJni OK");
+    return 0;
+}
+
+static void arm_crash_handler(const char *what) {
+    install_crash_handler();
+    LOGI("[arm] crash handler installiert vor %s", what);
+    verify_sigsegv_handler(what);
+}
+
+int main(int argc, char **argv) {
+    (void)argc; (void)argv;
+    rawlog("[boot] main() entered\n");
+
+    /* Core-Dumps aktivieren (falls ulimit im Wrapper gesetzt) */
+    prctl(PR_SET_DUMPABLE, 1, 0, 0, 0);
+    struct rlimit rl = { RLIM_INFINITY, RLIM_INFINITY };
+    setrlimit(RLIMIT_CORE, &rl);
+
+    install_crash_handler();
+
+    LOGI("Dead Effect Loader startet");
+    LOGI("  libdir = %s", DEAD_EFFECT_LIBDIR);
+    LOGI("  assets = %s", DEAD_EFFECT_ASSETS);
+
+    jni_shim_init();
+    jni_install_android_contract();
+    rawlog("[boot] jni_shim_init + contract done\n");
+
+    g_fake_unity_player_obj.class_ref = &g_fake_unity_player_obj;
+    LOGI("Fake-UnityPlayer-Objekt vorbereitet: thiz=%p class_ref=%p",
+         g_unity_player_thiz, g_fake_unity_player_obj.class_ref);
+
+    preload_libcxx();
+    rawlog("[boot] preload_libcxx done\n");
+
+    rawlog("[boot] video_init...\n");
+    if (video_init() != 0) { rawlog("[boot] video_init failed\n"); return 1; }
+    rawlog("[boot] video_init done\n");
+
+    rawlog("[boot] load_module_chain...\n");
+    if (load_module_chain() != 0) { rawlog("[boot] load_module_chain failed\n"); return 1; }
+    rawlog("[boot] load_module_chain done\n");
+
+    rawlog("[boot] starting crash handler watchdog...\n");
+    pthread_t watchdog;
+    if (pthread_create(&watchdog, NULL, crash_handler_watchdog, NULL) != 0) {
+        rawlog("[boot] WARN: watchdog thread creation failed\n");
+    } else {
+        rawlog("[boot] watchdog thread started\n");
+    }
+
+    jni_shim_set_egl(egl_dpy, egl_surf, egl_ctx);
+    void *env = jni_get_env();
+
+    LOGI("g_unity_player_thiz = %p (statisches Objekt, 512+ Bytes)", g_unity_player_thiz);
+
+    if (unity_native_surface_changed) {
+        arm_crash_handler("nativeSendSurfaceChangedEvent");
+        LOGI("Rufe nativeSendSurfaceChangedEvent(env=%p, thiz=%p, 640, 480)",
+             env, g_unity_player_thiz);
+        unity_native_surface_changed(env, g_unity_player_thiz, 640, 480);
+        LOGI("nativeSendSurfaceChangedEvent OK");
+    } else {
+        LOGI("[WARN] nativeSendSurfaceChangedEvent nicht gefunden");
+    }
+
+    if (unity_native_recreate_gfx_state) {
+        arm_crash_handler("nativeRecreateGfxState");
+        LOGI("Rufe nativeRecreateGfxState(env=%p, thiz=%p, 0, NULL)",
+             env, g_unity_player_thiz);
+        unity_native_recreate_gfx_state(env, g_unity_player_thiz, 0, NULL);
+        LOGI("nativeRecreateGfxState OK");
+    } else {
+        LOGI("[WARN] nativeRecreateGfxState nicht gefunden");
+    }
+
+    if (unity_native_focus_change) {
+        arm_crash_handler("nativeFocusChanged");
+        LOGI("Rufe nativeFocusChanged(env=%p, thiz=%p, true)",
+             env, g_unity_player_thiz);
+        unity_native_focus_change(env, g_unity_player_thiz, 1);
+        LOGI("nativeFocusChanged OK");
+    } else {
+        LOGI("[WARN] nativeFocusChanged nicht gefunden");
+    }
+
+    if (unity_native_resume) {
+        arm_crash_handler("nativeResume");
+        LOGI("Rufe nativeResume(env=%p, thiz=%p)", env, g_unity_player_thiz);
+        unity_native_resume(env, g_unity_player_thiz);
+        LOGI("nativeResume OK");
+    } else {
+        LOGI("[WARN] nativeResume nicht gefunden");
+    }
+
+    int running = 1;
+    int frame   = 0;
+    while (running) {
+        SDL_Event ev;
+        while (SDL_PollEvent(&ev)) {
+            if (ev.type == SDL_QUIT) running = 0;
+            if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE) running = 0;
+            jni_shim_handle_sdl_event(&ev);
+        }
+
+        jni_pump_ui_tasks();
+
+        if (unity_native_render && env) {
+            arm_crash_handler("nativeRender");
+            LOGI("render frame %d — rufe nativeRender(env=%p, thiz=%p) ...",
+                 frame, env, g_unity_player_thiz);
+            unsigned char ok = unity_native_render(env, g_unity_player_thiz);
+            LOGI("render frame %d — nativeRender OK (rc=%u)", frame, ok);
+        } else {
+            LOGI("render frame %d — kein nativeRender/env", frame);
+        }
+        SDL_GL_SwapWindow(sdl_win);
+        frame++;
+        if (frame > 5) {
+            LOGI("5 Frames erreicht — beende Test");
+            running = 0;
+        }
+    }
+
+    if (unity_native_pause && env) {
+        arm_crash_handler("nativePause");
+        LOGI("Rufe nativePause(env=%p, thiz=%p)", env, g_unity_player_thiz);
+        unity_native_pause(env, g_unity_player_thiz);
+    }
+    if (unity_native_focus_change) {
+        LOGI("Rufe nativeFocusChanged(env=%p, thiz=%p, false)",
+             env, g_unity_player_thiz);
+        unity_native_focus_change(env, g_unity_player_thiz, 0);
+    }
+    LOGI("Loader beendet");
+    return 0;
+}
