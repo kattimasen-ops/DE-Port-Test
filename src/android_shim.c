@@ -54,7 +54,7 @@ int __android_log_write(int prio, const char *tag, const char *text) {
 }
 
 /* ------------------------------------------------------------ */
-/* sigaction / signal Intercept (jetzt mit Caller-Logging)       */
+/* sigaction / signal Intercept (mit Caller-Logging)             */
 /* ------------------------------------------------------------ */
 static int is_protected_signal(int sig) {
     return sig == SIGSEGV || sig == SIGBUS || sig == SIGILL ||
@@ -126,30 +126,67 @@ void *de_dlopen(const char *path, int flags) {
 }
 
 /* ------------------------------------------------------------ */
-/* eglGetProcAddress Intercept                                   */
+/* eglGetProcAddress Intercept MIT FALLBACK-STUB                 */
 /*                                                               */
-/* Unity sucht nach GL-Funktionen ueber eglGetProcAddress. Wenn  */
-/* eine davon NULL zurueckkommt und Unity sie ungeprueft         */
-/* speichert, ist der spaetere Aufruf ein Sprung nach 0.         */
+/* Wenn eine GL-Funktion auf NextOS fehlt, liefert die echte     */
+/* libEGL NULL. Wird dieser NULL-Zeiger später ungeprüft         */
+/* aufgerufen, crasht Unity mit PC=0.                            */
+/*                                                               */
+/* Loesung: statt NULL wird ein generischer Stub zurueckgegeben. */
+/* Der Stub loggt den Aufruf und liefert 0 in x0/v0 zurueck.     */
+/* Auf ARM64 ist x0 == v0 (Rueckgaberegister fuer Integer und    */
+/* Float). Alle Argumente in x0-x7 werden ignoriert, was fuer    */
+/* das Register-/Stack-Layout safe ist.                          */
 /* ------------------------------------------------------------ */
 typedef void *(*egl_get_proc_t)(const char *);
 static egl_get_proc_t g_real_egl_get_proc = NULL;
 static int g_real_egl_tried = 0;
 
+/* Ringpuffer fuer Log-Namen, damit der Stub sie mitloggen kann. */
+#define EGL_STUB_SLOTS 64
+static const char *g_egl_stub_name[EGL_STUB_SLOTS];
+static int         g_egl_stub_slot = 0;
+static int         g_egl_stub_wrap = 0;
+
+/* Der generische Stub. Wird beim ersten Aufruf geloggt. */
+static int g_stub_logged = 0;
+__attribute__((noinline))
+static void *de_gl_missing_stub(void) {
+    if (!g_stub_logged) {
+        g_stub_logged = 1;
+        LOGI("[egl-stub] FEHLENDE GL-FUNKTION AUFGERUFEN — "
+             "siehe vorherige eglGetProcAddress-Logs fuer den Namen");
+    }
+    return NULL;
+}
+
 __attribute__((visibility("default")))
 void *eglGetProcAddress(const char *procname) {
     if (!g_real_egl_tried) {
         g_real_egl_tried = 1;
-        /* direkt per dlsym(RTLD_NEXT) - umgeht unsere eigene Interposition */
         g_real_egl_get_proc = (egl_get_proc_t)dlsym(RTLD_NEXT, "eglGetProcAddress");
         if (!g_real_egl_get_proc) {
             LOGE("[eglGetProcAddress] RTLD_NEXT fehlgeschlagen");
         }
     }
+
     void *ret = NULL;
     if (g_real_egl_get_proc) ret = g_real_egl_get_proc(procname);
-    LOGI("[eglGetProcAddress] %s -> %p", procname ? procname : "?", ret);
-    return ret;
+
+    if (ret) {
+        LOGI("[eglGetProcAddress] %s -> %p", procname ? procname : "?", ret);
+        return ret;
+    }
+
+    /* Fallback: Namen merken und Stub zurueckgeben. */
+    int slot = g_egl_stub_slot;
+    g_egl_stub_name[slot] = procname ? procname : "?";
+    g_egl_stub_slot = (g_egl_stub_slot + 1) % EGL_STUB_SLOTS;
+    if (g_egl_stub_slot == 0) g_egl_stub_wrap = 1;
+
+    LOGI("[eglGetProcAddress] FEHLT: %s -> STUB %p (statt NULL)",
+         procname ? procname : "?", (void *)de_gl_missing_stub);
+    return (void *)de_gl_missing_stub;
 }
 
 /* ------------------------------------------------------------ */
@@ -307,7 +344,7 @@ int pthread_atfork(void (*p)(void), void (*q)(void), void (*c)(void)) {
 }
 
 /* ------------------------------------------------------------ */
-/* pthread_create passthrough (KEIN Intercept mehr)              */
+/* pthread_create passthrough (KEIN Intercept)                   */
 /* ------------------------------------------------------------ */
 __attribute__((visibility("default")))
 int de_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
