@@ -37,8 +37,29 @@ jobs:
           echo "=== work/ ==="
           ls -la "$GITHUB_WORKSPACE/work" 2>/dev/null || echo "(kein work/)"
           echo ""
+          echo "=== work/build_src/ ==="
+          ls -la "$GITHUB_WORKSPACE/work/build_src" 2>/dev/null || echo "(kein build_src/)"
+          echo ""
+          echo "=== Loader-Binary Info ==="
+          LD="$GITHUB_WORKSPACE/work/build_src/deadeffect-loader"
+          if [ -f "$LD" ]; then
+            file "$LD"
+            stat -c 'Groesse: %s Bytes' "$LD"
+            echo "--- DT_NEEDED ---"
+            readelf -d "$LD" 2>/dev/null | grep NEEDED || true
+            echo "--- Undefined Symbols (Top 60) ---"
+            aarch64-linux-gnu-nm -D --undefined-only "$LD" 2>/dev/null | head -60 || true
+            echo "--- Exportierte Kern-Symbole (Sanity) ---"
+            aarch64-linux-gnu-nm "$LD" 2>/dev/null | grep -E ' T (slCreateEngine|jni_find_native|jni_dump_natives|so_load)$' || true
+          else
+            echo "(deadeffect-loader nicht vorhanden)"
+          fi
+          echo ""
+          echo "=== Port-Paket-Struktur ==="
+          find "$GITHUB_WORKSPACE/work/port" -maxdepth 3 -type f 2>/dev/null | sort || true
+          echo ""
           echo "=== Tail build.log ==="
-          tail -60 "$GITHUB_WORKSPACE/work/build.log" 2>/dev/null || echo "(kein log)"
+          tail -80 "$GITHUB_WORKSPACE/work/build.log" 2>/dev/null || echo "(kein log)"
 
       - uses: actions/upload-artifact@v4
         if: always()
