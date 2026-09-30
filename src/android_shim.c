@@ -53,6 +53,42 @@ int __android_log_write(int prio, const char *tag, const char *text) {
     return text ? (int)strlen(text) : 0;
 }
 
+/* ============================================================ */
+/* Bionic-ABI-Definitionen (arm64)                              */
+/*                                                              */
+/* Bionic userspace "struct sigaction" (32 Bytes):              */
+/*   +0   sa_handler / sa_sigaction      (8 Bytes)              */
+/*   +8   sa_mask                        (8 Bytes)              */
+/*   +16  sa_flags                       (4 Bytes + 4 Padding)  */
+/*   +24  sa_restorer                    (8 Bytes)              */
+/*                                                              */
+/* Kernel arm64 "struct sigaction" (32 Bytes):                  */
+/*   +0   k_sa_handler                   (8 Bytes)              */
+/*   +8   sa_flags                       (8 Bytes)              */
+/*   +16  sa_restorer                    (8 Bytes)              */
+/*   +24  sa_mask                        (8 Bytes)              */
+/*                                                              */
+/* Bionic "sigset_t" = 8 Bytes (1 x unsigned long).             */
+/* glibc  "sigset_t" = 128 Bytes.                               */
+/*                                                              */
+/* libunity wurde gegen bionic gebaut; wir muessen daher        */
+/* bionic-Semantik liefern, auch wenn unser Loader gegen glibc  */
+/* linkt.                                                       */
+/* ============================================================ */
+struct de_bionic_sigaction {
+    void     *sa_handler;   /* union mit sa_sigaction */
+    uint64_t  sa_mask;
+    int       sa_flags;
+    void     *sa_restorer;
+};
+
+struct de_kernel_sigaction {
+    void          *k_sa_handler;
+    unsigned long  k_sa_flags;
+    void          *k_sa_restorer;
+    uint64_t       k_sa_mask;
+};
+
 /* ------------------------------------------------------------ */
 /* sigaction / signal Intercept (mit Caller-Logging)             */
 /* ------------------------------------------------------------ */
@@ -61,24 +97,59 @@ static int is_protected_signal(int sig) {
            sig == SIGFPE  || sig == SIGABRT;
 }
 
+/* Kern-Syscall mit korrekter Layout-Uebersetzung.              */
+static int de_rt_sigaction_translate(int signum,
+                                     const struct de_bionic_sigaction *bact,
+                                     struct de_bionic_sigaction       *bold)
+{
+    struct de_kernel_sigaction kact, kold;
+    struct de_kernel_sigaction *pkact = NULL;
+    struct de_kernel_sigaction *pkold = NULL;
+
+    if (bact) {
+        kact.k_sa_handler = bact->sa_handler;
+        kact.k_sa_flags   = (unsigned long)bact->sa_flags;
+        kact.k_sa_restorer= bact->sa_restorer;
+        kact.k_sa_mask    = bact->sa_mask;
+        pkact = &kact;
+    }
+    if (bold) pkold = &kold;
+
+    /* sigsetsize = 8 (kernel-Sigset auf arm64), NICHT sizeof(glibc_sigset_t)=128 */
+    int r = (int)syscall(SYS_rt_sigaction, signum, pkact, pkold, (long)8);
+
+    if (r == 0 && bold) {
+        bold->sa_handler  = kold.k_sa_handler;
+        bold->sa_mask     = kold.k_sa_mask;
+        bold->sa_flags    = (int)kold.k_sa_flags;
+        bold->sa_restorer = kold.k_sa_restorer;
+    }
+    return r;
+}
+
 __attribute__((visibility("default")))
 int de_sigaction(int signum, const struct sigaction *act,
                  struct sigaction *oldact)
 {
     void *caller = __builtin_return_address(0);
+
+    const struct de_bionic_sigaction *bact = (const void *)act;
+    struct de_bionic_sigaction       *bold = (void *)oldact;
+
     if (is_protected_signal(signum) && act) {
         LOGI("[sigaction] BLOCKIERT signum=%d caller=%p (behalte %p)",
              signum, caller, (void *)g_de_crash_handler);
-        if (oldact) {
-            memset(oldact, 0, sizeof(*oldact));
-            oldact->sa_sigaction = g_de_crash_handler;
-            oldact->sa_flags     = SA_SIGINFO | SA_ONSTACK;
+        if (bold) {
+            bold->sa_handler  = (void *)g_de_crash_handler;
+            bold->sa_mask     = 0;
+            bold->sa_flags    = SA_SIGINFO | SA_ONSTACK;
+            bold->sa_restorer = NULL;
         }
         return 0;
     }
+
     LOGI("[sigaction] durchreichen signum=%d caller=%p", signum, caller);
-    return (int)syscall(SYS_rt_sigaction, signum, act, oldact,
-                        (long)sizeof(sigset_t));
+    return de_rt_sigaction_translate(signum, bact, bold);
 }
 
 typedef void (*sighandler_t)(int);
@@ -90,15 +161,61 @@ sighandler_t de_signal(int signum, sighandler_t handler) {
         LOGI("[signal] BLOCKIERT signum=%d caller=%p", signum, caller);
         return SIG_DFL;
     }
-    struct sigaction sa, old;
-    memset(&sa, 0, sizeof(sa));
-    memset(&old, 0, sizeof(old));
-    sa.sa_handler = handler;
-    sa.sa_flags   = SA_RESTART;
-    sigemptyset(&sa.sa_mask);
-    if (de_sigaction(signum, &sa, &old) == 0)
-        return old.sa_handler;
+    struct de_bionic_sigaction bnew, bold;
+    memset(&bnew, 0, sizeof(bnew));
+    memset(&bold, 0, sizeof(bold));
+    bnew.sa_handler = (void *)handler;
+    bnew.sa_flags   = SA_RESTART;
+    bnew.sa_mask    = 0;
+    if (de_sigaction(signum, (const struct sigaction *)&bnew,
+                     (struct sigaction *)&bold) == 0)
+        return (sighandler_t)bold.sa_handler;
     return SIG_ERR;
+}
+
+/* ============================================================ */
+/* Bionic-konforme sigset-Operationen (8 Bytes statt 128).      */
+/*                                                              */
+/* glibc's sigemptyset/sigfillset/sigaddset/sigdelset/          */
+/* sigismember arbeiten mit glibc-`sigset_t` (128 Bytes).       */
+/* libunity's Aufrufer 62ea98 reserviert aber nur 8 Bytes auf   */
+/* dem Stack. Wenn glibc's Variante laeuft, ueberschreibt sie   */
+/* 120 Bytes Stack und zerstoert damit x19/x20/x21/x22/x30 in   */
+/* 64578c. Der Epilog `ldp x19,x30; ret` springt dann mit       */
+/* x30=0 nach PC=0 — exakt das Crash-Bild.                      */
+/*                                                              */
+/* Diese hier schreiben ausschliesslich 8 Bytes.                */
+/* ============================================================ */
+__attribute__((visibility("default")))
+int sigemptyset(sigset_t *set) {
+    if (set) *(volatile uint64_t *)set = 0ULL;
+    return 0;
+}
+
+__attribute__((visibility("default")))
+int sigfillset(sigset_t *set) {
+    if (set) *(volatile uint64_t *)set = ~0ULL;
+    return 0;
+}
+
+__attribute__((visibility("default")))
+int sigaddset(sigset_t *set, int signum) {
+    if (set && signum > 0 && signum <= 64)
+        *(volatile uint64_t *)set |= (1ULL << (signum - 1));
+    return 0;
+}
+
+__attribute__((visibility("default")))
+int sigdelset(sigset_t *set, int signum) {
+    if (set && signum > 0 && signum <= 64)
+        *(volatile uint64_t *)set &= ~(1ULL << (signum - 1));
+    return 0;
+}
+
+__attribute__((visibility("default")))
+int sigismember(const sigset_t *set, int signum) {
+    if (!set || signum <= 0 || signum > 64) return 0;
+    return !!(*(const volatile uint64_t *)set & (1ULL << (signum - 1)));
 }
 
 /* ------------------------------------------------------------ */
@@ -167,14 +284,6 @@ void *eglGetProcAddress(const char *procname) {
 
 /* ------------------------------------------------------------ */
 /* pthread_key / specific Intercept                              */
-/*                                                               */
-/* libunity benutzt in 0x62ea98 einen pro-Thread-Kontext:        */
-/*   pthread_getspecific(key) -> wenn NULL: malloc(368) +        */
-/*   sigaction-Installer + pthread_setspecific(key, obj).        */
-/*   Am Ende: tail-call auf pthread_getspecific fuer die         */
-/*   Rueckgabe. Wenn der Key ungueltig ist oder setspecific      */
-/*   fehlschlaegt, liefert 62ea98 dauerhaft NULL → x19=0 in      */
-/*   nativeSendSurfaceChangedEvent → spaeterer Nullsprung.       */
 /* ------------------------------------------------------------ */
 extern int   __pthread_key_create(pthread_key_t *, void (*)(void *));
 extern int   __pthread_setspecific(pthread_key_t, const void *);
