@@ -38,6 +38,14 @@ extern int  de_pthread_create(pthread_t *, const pthread_attr_t *,
                               void *(*)(void *), void *);
 extern void *eglGetProcAddress(const char *);
 
+/* Bionic-konforme sigset-Funktionen aus android_shim.c.         */
+/* Diese Ueberschreiben glibc's 128-Byte-Varianten.              */
+extern int sigemptyset(sigset_t *);
+extern int sigfillset(sigset_t *);
+extern int sigaddset(sigset_t *, int);
+extern int sigdelset(sigset_t *, int);
+extern int sigismember(const sigset_t *, int);
+
 typedef struct {
     void *base;
     size_t size;
@@ -86,6 +94,15 @@ static void *resolve_symbol_full(const char *name) {
     if (strcmp(name, "dlopen")            == 0) return (void *)de_dlopen;
     if (strcmp(name, "pthread_create")    == 0) return (void *)de_pthread_create;
     if (strcmp(name, "eglGetProcAddress") == 0) return (void *)eglGetProcAddress;
+
+    /* Bionic-konforme sigset-Operationen (8 Bytes, nicht 128). */
+    /* Ohne diese Ueberschreibung laeuft glibc's Version und    */
+    /* zerstoert den Stack des Aufrufers 62ea98 → Crash.        */
+    if (strcmp(name, "sigemptyset")       == 0) return (void *)sigemptyset;
+    if (strcmp(name, "sigfillset")        == 0) return (void *)sigfillset;
+    if (strcmp(name, "sigaddset")         == 0) return (void *)sigaddset;
+    if (strcmp(name, "sigdelset")         == 0) return (void *)sigdelset;
+    if (strcmp(name, "sigismember")       == 0) return (void *)sigismember;
 
     /* --- Eigene Module durchsuchen --- */
     for (int i = 0; i < g_nmods; i++) {
