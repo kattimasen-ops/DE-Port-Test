@@ -93,12 +93,12 @@ jobs:
           - LOAD R E: Offset 0x0, Vaddr 0x0, FileSiz 0x15b41bc
           - LOAD RW : Offset 0x15b4938, Vaddr 0x15c4938, FileSiz 0x6f748, MemSiz 0x16e7b0
           - NEEDED: libandroid.so, liblog.so, libz.so, libEGL.so, libm.so, libdl.so, libc.so
-          - INIT_ARRAY: Vaddr 0x15c4938, Groesse 0xcf8 → 415 Eintraege
-          - FINI_ARRAY: Vaddr 0x15c5630, 16 Bytes → 2 Eintraege
+          - INIT_ARRAY: Vaddr 0x15c4938, Groesse 0xcf8 -> 415 Eintraege
+          - FINI_ARRAY: Vaddr 0x15c5630, 16 Bytes -> 2 Eintraege
           - PLTGOT: 0x1615fe8
-          - PLTRELSZ: 8904 Bytes → 371-373 Eintraege
+          - PLTRELSZ: 8904 Bytes -> 371-373 Eintraege
           - JMPREL: 0xdbfc0
-          - RELA: 0x7b00, RELASZ: 869568 Bytes → 36232 Eintraege
+          - RELA: 0x7b00, RELASZ: 869568 Bytes -> 36232 Eintraege
           - Exportiert: 363 Funktionen, Importiert: 357 Symbole
 
           ## Bekannte Symbole
@@ -107,13 +107,11 @@ jobs:
           - 0x3dd190  T UnitySendMessage
           - 0x6349f4  T UnitySwappy_injectTracer
           - 0x6349e8  T UnitySwappy_version
-          - 0xd33f2c  T Java_com_google_androidgamesdk_ChoreographerCallback_nOnChoreographer
-          - 0xd39148  T Java_com_google_androidgamesdk_SwappyDisplayManager_nOnRefreshRateChanged
-          - 0xd38f6c  T Java_com_google_androidgamesdk_SwappyDisplayManager_nSetSupportedRefreshRates
 
           ## Wichtige native JNI-Methoden
           - nativeSendSurfaceChangedEvent  name_va=0x122a269  jnimethod_off=0x161f588  fnPtr=0x65bb90
           - nativeRender                   fnPtr=0x65bbdc
+          - initJni                        fnPtr=0x65b8c8
 
           ## nativeSendSurfaceChangedEvent (0x65bb90) — 76 Bytes
             65bb90: stp  x19, x30, [sp, #-16]!
@@ -135,16 +133,28 @@ jobs:
             65bbd0: bl   630314
             65bbd4: ldp  x19, x30, [sp], #16
             65bbd8: ret
-          Callees: 62ea98, 6302f4, 62eb04, 430dc8, 2676c8, 630314
+
+          ## 62ea98 — Pro-Thread-Kontext (liefert x19)
+          - Nutzt pthread_key bei 16a8000 + 0xad0 (Default 0, .bss)
+          - pthread_getspecific -> 0 beim ersten Aufruf
+          - malloc(368), dann sigaction-Installer 0x64578c
+          - pthread_setspecific(key, P)
+          - tail-call pthread_getspecific -> Rueckgabe
+          WICHTIG: Nur 62ea98 ruft den sigaction-Installer 0x64578c auf.
+          Wenn pthread_setspecific fehlschlaegt, liefert 62ea98 dauerhaft NULL.
+
+          ## nativeSendSurfaceChangedEvent — Callees
+          62ea98 -> Thread-Context holen
+          6302f4 -> *obj = 1
+          62eb04 -> liest *(obj+264) als Status
+          430dc8 -> konstante Adresse 0x16930c0
+          2676c8 -> Container-Iteration, blr x8 @ 0x2676fc
+          630314 -> Cleanup, blr x8 @ 0x630354 und tiefer
 
           ## Signal-Handler-Installer
           - sigaction-Installer: 0x64578c
-            Lock 0x6457a8, sigemptyset 0x6457e8, sa_flags=0x18000004
-            sigaction(sig,NULL,&old) @ 0x645814
-            sigaction(sig,&new,NULL) @ 0x645840
-            sigaction-Restore @ 0x6458cc (Teardown 0x645870)
-          - sigaltstack-Setup: 0x6307a8 (mmap @ 0x63081c, sigaltstack @ 0x630848)
-          - sigaltstack-Teardown: 0x63089c
+          - Aufrufer: NUR 62eae4 (aus 62ea98)
+          - sigaltstack-Setup: 0x6307a8
 
           ## GOT-Slots fuer Signal-Funktionen
           0x1616090 raise@LIBC
@@ -156,15 +166,6 @@ jobs:
           0x1616938 sigaction@LIBC
           0x1616aa8 pthread_cond_signal@LIBC
 
-          ## Aufrufer-Statistik
-          sigaction        Aufrufe: 4  (0x645814, 0x645840, 0x6458cc)
-          signal           Aufrufe: 10
-          sigaltstack      Aufrufe: 5
-          raise            Aufrufe: 4  (0x379384, 0x5c2748, 0xc3ae58)
-          kill             Aufrufe: 2  (0x515f0c)
-          pthread_create   Aufrufe: 6
-          __cxa_atexit     Aufrufe: 1220
-
           ## JNI_OnLoad (0x65c468) — Callees
           0x51e6a4, 0x62e464, 0x62e4d8, 0x62ec44, 0x62ecb8
           0x655ddc, 0x655e50, 0x659538, 0x6595ac
@@ -174,26 +175,22 @@ jobs:
           0x65c5d4 (RegisterNatives 2 Methoden)
           0x65c6ac, 0x65c710, 0x65c774
 
-          ## Gemeinsame Dispatcher-Bloecke
-          0x65c0dc, 0x65c0f8, 0x65c110, 0x65c12c
-          0x65c180, 0x65c1ac, 0x65c1c4
-          Haeufigster: blr x8 @ 0x65c0dc
-
           ## Laufzeit-Log (letzter Lauf)
           - libmain, libunity (415 init_array), libil2cpp (9 init_array) OK
           - JNI 45 Methoden registriert
-          - initJni komplett durchgelaufen (bis Scanner.next)
+          - initJni komplett durchgelaufen
           - NULL-Rueckgaben: getClassLoader, Activity.getIntent, Context.getAssets
           - Crash: PC=0x0, LR=0x0, x0=x2=x19=x20=x21=0, x1=x3=1
-          - Thread: DEMain
 
-          ## Crash-Hypothese (Stand V4)
-          x19=0 stammt aus Rueckgabe von 0x62ea98 (erster Callee).
-          0x62ea98 liefert 0 wegen unvollstaendigem Unity-Zustand.
-          Verdacht: NULL-Rueckgaben aus initJni → fehlende Objekte.
+          ## Crash-Hypothese
+          x19=0 stammt aus Rueckgabe von 62ea98.
+          62ea98 nutzt pthread_key bei 16a8000+0xad0.
+          Kein pthread_key_create in JNI_OnLoad-Callees sichtbar.
+          Verdacht: Key bleibt 0, pthread_setspecific scheitert,
+          pthread_getspecific liefert dauerhaft NULL.
 
           ## Umgebung
-          - Geraet: NextOS ARM64 Handheld (Mali-G31, Panfrost/Mesa, GLES 3.2)
+          - Geraet: NextOS ARM64 Handheld (Mali-G31, GLES 3.2)
           - Loader: St0len-LD (Binary: deadeffect-loader)
           - Port-Verzeichnis: /roms/ports/DeadEffect/
           KFE
@@ -701,15 +698,14 @@ jobs:
             echo "  Callees: 62ea98, 6302f4, 62eb04, 430dc8, 2676c8, 630314"
             echo "  x19 = Rueckgabe von 62ea98; im Crash x19=0"
             echo ""
+            echo "62ea98 nutzt pthread_key bei 16a8000 + 0xad0 (Default 0, .bss)"
+            echo "  pthread_getspecific -> 0 (erster Aufruf)"
+            echo "  malloc(368) -> sigaction-Installer 0x64578c"
+            echo "  pthread_setspecific(key, P)"
+            echo "  tail-call pthread_getspecific -> Rueckgabe"
+            echo "  Nur 62ea98 ruft den Installer 0x64578c auf."
+            echo ""
             echo "nativeRender fnPtr = 0x65bbdc"
-            echo ""
-            echo "sigaction-Installer: 0x64578c"
-            echo "sigaltstack-Setup: 0x6307a8"
-            echo "sigaltstack-Teardown: 0x63089c"
-            echo ""
-            echo "Gemeinsame Dispatcher-Bloecke:"
-            echo "  0x65c0dc, 0x65c0f8, 0x65c110, 0x65c12c"
-            echo "  0x65c180, 0x65c1ac, 0x65c1c4"
           } > "$LOG/known_libunity.txt"
 
           echo "Konsolidiert: $(wc -l < "$LOG/libunity_all.txt") Zeilen"
@@ -810,16 +806,59 @@ jobs:
             echo "Dispatcher-Bloecke: $(wc -l < "$OUT/dispatchers.txt" 2>/dev/null) Zeilen"
             echo "ns_surface_full.txt: $(wc -l < "$OUT/ns_surface_full.txt" 2>/dev/null) Zeilen"
             echo ""
-            echo "--- Aufrufer der Dispatcher ---"
-            for D in 65c0dc 65c0f8 65c110 65c12c 65c180 65c1ac 65c1c4; do
-              N=$(wc -l < "$OUT/callers_of_${D}.txt" 2>/dev/null)
-              echo "  ${D}: ${N} Aufrufer"
-            done
-            echo ""
             echo "--- Aufrufer des sigaction-Installers ---"
             cat "$OUT/callers_of_installer.txt" 2>/dev/null || echo "(keine)"
           } > "$OUT/SUMMARY.txt"
           cat "$OUT/SUMMARY.txt"
+
+      # ============================================================
+      # Phase 13b — Refs auf 16a8ad0 / pthread_key_create
+      # ============================================================
+      - name: "Phase 13b: refs auf 16a8ad0 / pthread_key_create"
+        continue-on-error: true
+        run: |
+          LIB="analysis/deadeffect/libunity.so"
+          OUT="analysis/libunity"
+          [ -f "$LIB" ] || exit 0
+          if [ ! -s "$OUT/disasm_full.txt" ]; then
+            aarch64-linux-gnu-objdump -d --no-show-raw-insn "$LIB" \
+              > "$OUT/disasm_full.txt" 2>&1 || true
+          fi
+          {
+            echo "=========================================="
+            echo "  REFS auf 16a8ad0 / 16a8ac8 / pthread_key_create"
+            echo "=========================================="
+            echo ""
+            echo "--- pthread_key_create@plt Aufrufe ---"
+            grep -nE 'pthread_key_create@plt' "$OUT/disasm_full.txt" || echo "(keine)"
+            echo ""
+            echo "--- pthread_getspecific@plt Aufrufe ---"
+            grep -nE 'pthread_getspecific@plt' "$OUT/disasm_full.txt" || echo "(keine)"
+            echo ""
+            echo "--- pthread_setspecific@plt Aufrufe ---"
+            grep -nE 'pthread_setspecific@plt' "$OUT/disasm_full.txt" || echo "(keine)"
+            echo ""
+            echo "--- Refs auf 16a8ad0 (pthread key) ---"
+            grep -nE '16a8ad0' "$OUT/disasm_full.txt" || echo "(keine)"
+            echo ""
+            echo "--- Refs auf 16a8ac8 ---"
+            grep -nE '16a8ac8' "$OUT/disasm_full.txt" || echo "(keine)"
+            echo ""
+            echo "--- Refs auf 16a8000 (Basis) ---"
+            grep -nE '16a8000' "$OUT/disasm_full.txt" | head -40 || echo "(keine)"
+            echo ""
+            echo "=========================================="
+            echo "  KONTEXT um jeden Fund (je 8 Zeilen)"
+            echo "=========================================="
+            grep -nE '16a8ad0|16a8ac8|pthread_key_create@plt|pthread_getspecific@plt|pthread_setspecific@plt' \
+              "$OUT/disasm_full.txt" | cut -d: -f1 | while read LN; do
+                echo ""
+                echo "--- Zeile $LN ---"
+                sed -n "$((LN-8)),$((LN+8))p" "$OUT/disasm_full.txt"
+              done
+          } > "$OUT/refs_16a8ad0.txt"
+          echo "refs_16a8ad0.txt: $(wc -l < "$OUT/refs_16a8ad0.txt") Zeilen"
+          head -60 "$OUT/refs_16a8ad0.txt"
 
       # ============================================================
       # Phase 14 — JNI_OnLoad Callees tiefer
@@ -1111,7 +1150,7 @@ jobs:
             cat analysis/libunity/logs/symbol_stats.txt 2>/dev/null
             echo ""
             echo "## Signal-Handler-Installer"
-            echo "- sigaction-Installer: 0x64578c"
+            echo "- sigaction-Installer: 0x64578c (nur aus 62ea98 aufgerufen)"
             echo "- sigaltstack-Setup: 0x6307a8"
             echo ""
             echo "## GOT-Slots (Signal)"
@@ -1128,6 +1167,9 @@ jobs:
             echo ""
             echo "## nativeSendSurfaceChangedEvent — Callees"
             cat analysis/libunity/callees_nssce/SUMMARY.txt 2>/dev/null
+            echo ""
+            echo "## Refs auf 16a8ad0 / pthread_key_create"
+            cat analysis/libunity/refs_16a8ad0.txt 2>/dev/null | head -80
             echo ""
             echo "## Aufrufer-Statistik"
             cat analysis/libunity/logs/phase3_summary.txt 2>/dev/null
@@ -1162,8 +1204,7 @@ jobs:
           ============================================================
 
           Dieser Ordner enthaelt alle relevanten Analyse-Ergebnisse
-          als flache Dateiliste. Die Roh-Analyse liegt unter
-          analysis/<lib>/... zur Einsicht.
+          als flache Dateiliste.
 
           POST-REIHENFOLGE FUER DEN NAECHSTEN DEEPSEEK-CHAT
           (falls Token-Limit — von oben nach unten):
@@ -1177,6 +1218,9 @@ jobs:
             22_nssce_callees.txt
             23_nssce_dispatchers.txt
             24_nssce_nativeRender.txt
+            25_nssce_full.txt
+            26_refs_16a8ad0.txt
+            27_jni_onload_trace_callees.txt
             30_jni_onload_summary.txt
             31_jni_onload_trace.txt
             40_jni_callsites_summary.txt
@@ -1211,6 +1255,8 @@ jobs:
           23_nssce_dispatchers.txt        Gemeinsame blr-Bloecke
           24_nssce_nativeRender.txt       nativeRender Disassembly
           25_nssce_full.txt               Umfeld nSSCE komplett
+          26_refs_16a8ad0.txt             Grep: pthread_key + 16a8ad0 mit Kontext
+          27_jni_onload_trace_callees.txt Alle 17 JNI_OnLoad-Callees kombiniert
 
           30_jni_onload_summary.txt       Uebersicht Callees
           31_jni_onload_trace.txt         JNI_OnLoad-Callees disassembliert
@@ -1266,7 +1312,11 @@ jobs:
             echo "Callees: 62ea98, 6302f4, 62eb04, 430dc8, 2676c8, 630314"
             echo ""
             echo "x19 = Rueckgabe von 0x62ea98 (mov x19,x0 nach bl 62ea98)"
-            echo "Im Crash: x19=0 → 62ea98 liefert 0"
+            echo "Im Crash: x19=0 -> 62ea98 liefert 0"
+            echo ""
+            echo "62ea98 nutzt pthread_key bei 16a8000 + 0xad0 (Default 0, .bss)"
+            echo "pthread_getspecific -> 0 -> malloc(368) -> sigaction-Installer 0x64578c"
+            echo "pthread_setspecific(key, P) -> tail-call pthread_getspecific"
             echo ""
             for A in 62ea98 6302f4 62eb04 430dc8 2676c8 630314; do
               echo ""
@@ -1289,13 +1339,17 @@ jobs:
           cp analysis/libunity/callees_nssce/ns_surface_full.txt \
              "$FLAT/25_nssce_full.txt" 2>/dev/null || true
 
-          # ---------- 30 / 31 ----------
-          cp analysis/libunity/jni_onload_trace/SUMMARY.txt \
-             "$FLAT/30_jni_onload_summary.txt" 2>/dev/null || true
+          # ---------- 26 — Refs auf 16a8ad0 / pthread_key ----------
+          cp analysis/libunity/refs_16a8ad0.txt \
+             "$FLAT/26_refs_16a8ad0.txt" 2>/dev/null || true
+
+          # ---------- 27 — JNI_OnLoad Trace Callees kombiniert ----------
           {
             echo "=========================================="
-            echo " JNI_OnLoad (0x65c468) — Callees (eine Ebene tiefer)"
+            echo " JNI_OnLoad Callees eine Ebene tiefer"
             echo "=========================================="
+            echo ""
+            echo "Alle 17 Callees aus 0x65c468, jeweils disassembliert."
             echo ""
             for A in 51e6a4 62e464 62e4d8 62ec44 62ecb8 655ddc 655e50 659538 6595ac 65a300 65a374 65c4f4 65c564 65c5d4 65c6ac 65c710 65c774; do
               echo ""
@@ -1304,7 +1358,15 @@ jobs:
               echo "##########################################"
               cat "analysis/libunity/jni_onload_trace/callee_${A}.txt" 2>/dev/null || echo "(fehlt)"
             done
-          } > "$FLAT/31_jni_onload_trace.txt"
+          } > "$FLAT/27_jni_onload_trace_callees.txt"
+
+          # ---------- 30 / 31 ----------
+          cp analysis/libunity/jni_onload_trace/SUMMARY.txt \
+             "$FLAT/30_jni_onload_summary.txt" 2>/dev/null || true
+
+          # 31 wie 27, aber kompakt als Summary
+          cp "$FLAT/30_jni_onload_summary.txt" \
+             "$FLAT/31_jni_onload_trace.txt" 2>/dev/null || true
 
           # ---------- 40 / 41 ----------
           cp analysis/libunity/jni_callsites/SUMMARY.txt \
@@ -1357,8 +1419,8 @@ jobs:
             echo "=========================================="
             echo ""
             echo "sigaction-Installer: 0x64578c"
+            echo "  Aufrufer: NUR 62eae4 (aus 62ea98)"
             echo "sigaltstack-Setup:   0x6307a8"
-            echo "sigaltstack-Teardown:0x63089c"
             echo ""
             echo "--- phase3_summary (Aufruferstatistik) ---"
             cat analysis/libunity/logs/phase3_summary.txt 2>/dev/null
@@ -1405,8 +1467,10 @@ jobs:
             echo ""
             echo "--- fehlende Dateien (falls vorhanden) ---"
             for F in \
+              analysis/libunity/refs_16a8ad0.txt \
               analysis/libunity/callees_nssce/callee_62ea98.txt \
               analysis/libunity/callees_nssce/dispatchers.txt \
+              analysis/libunity/jni_onload_trace/callee_62e464.txt \
               analysis/libunity/jni_callsites/SUMMARY.txt \
               analysis/libunity/egl_callsites/SUMMARY.txt \
               analysis/libunity/indirect_sweep/register_histogram.txt \
@@ -1421,15 +1485,6 @@ jobs:
 
           echo "=== FLAT-Ordner Inhalt ==="
           ls -la "$FLAT"
-          echo ""
-          echo "=== Groessen-Check (Warnung > 5 MB) ==="
-          for f in "$FLAT"/*; do
-            [ -f "$f" ] || continue
-            SZ=$(stat -c%s "$f")
-            if [ "$SZ" -gt 5242880 ]; then
-              echo "  GROSS: $f ($SZ Bytes)"
-            fi
-          done
 
       # ============================================================
       # Upload
@@ -1444,6 +1499,7 @@ jobs:
             analysis/KNOWLEDGE_BASE.md
             analysis/summary.txt
             analysis/libunity/logs/
+            analysis/libunity/refs_16a8ad0.txt
             analysis/libunity/native_meta/
             analysis/libunity/callees_nssce/
             analysis/libunity/jni_onload_trace/
@@ -1471,8 +1527,8 @@ jobs:
           echo "=== FLAT-Ordner ==="
           ls -la analysis/_FLAT/
           echo ""
-          echo "=== 00_MANIFEST.txt ==="
-          cat analysis/_FLAT/00_MANIFEST.txt 2>/dev/null | head -60
+          echo "=== 26_refs_16a8ad0.txt (Top 60) ==="
+          head -60 analysis/_FLAT/26_refs_16a8ad0.txt 2>/dev/null || echo "(keine)"
           echo ""
           echo "=== nativeSendSurfaceChangedEvent — Callees ==="
           cat analysis/libunity/callees_nssce/SUMMARY.txt 2>/dev/null || echo "(keine)"
