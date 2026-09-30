@@ -127,28 +127,11 @@ void *de_dlopen(const char *path, int flags) {
 
 /* ------------------------------------------------------------ */
 /* eglGetProcAddress Intercept MIT FALLBACK-STUB                 */
-/*                                                               */
-/* Wenn eine GL-Funktion auf NextOS fehlt, liefert die echte     */
-/* libEGL NULL. Wird dieser NULL-Zeiger später ungeprüft         */
-/* aufgerufen, crasht Unity mit PC=0.                            */
-/*                                                               */
-/* Loesung: statt NULL wird ein generischer Stub zurueckgegeben. */
-/* Der Stub loggt den Aufruf und liefert 0 in x0/v0 zurueck.     */
-/* Auf ARM64 ist x0 == v0 (Rueckgaberegister fuer Integer und    */
-/* Float). Alle Argumente in x0-x7 werden ignoriert, was fuer    */
-/* das Register-/Stack-Layout safe ist.                          */
 /* ------------------------------------------------------------ */
 typedef void *(*egl_get_proc_t)(const char *);
 static egl_get_proc_t g_real_egl_get_proc = NULL;
 static int g_real_egl_tried = 0;
 
-/* Ringpuffer fuer Log-Namen, damit der Stub sie mitloggen kann. */
-#define EGL_STUB_SLOTS 64
-static const char *g_egl_stub_name[EGL_STUB_SLOTS];
-static int         g_egl_stub_slot = 0;
-static int         g_egl_stub_wrap = 0;
-
-/* Der generische Stub. Wird beim ersten Aufruf geloggt. */
 static int g_stub_logged = 0;
 __attribute__((noinline))
 static void *de_gl_missing_stub(void) {
@@ -169,7 +152,6 @@ void *eglGetProcAddress(const char *procname) {
             LOGE("[eglGetProcAddress] RTLD_NEXT fehlgeschlagen");
         }
     }
-
     void *ret = NULL;
     if (g_real_egl_get_proc) ret = g_real_egl_get_proc(procname);
 
@@ -178,15 +160,54 @@ void *eglGetProcAddress(const char *procname) {
         return ret;
     }
 
-    /* Fallback: Namen merken und Stub zurueckgeben. */
-    int slot = g_egl_stub_slot;
-    g_egl_stub_name[slot] = procname ? procname : "?";
-    g_egl_stub_slot = (g_egl_stub_slot + 1) % EGL_STUB_SLOTS;
-    if (g_egl_stub_slot == 0) g_egl_stub_wrap = 1;
-
     LOGI("[eglGetProcAddress] FEHLT: %s -> STUB %p (statt NULL)",
          procname ? procname : "?", (void *)de_gl_missing_stub);
     return (void *)de_gl_missing_stub;
+}
+
+/* ------------------------------------------------------------ */
+/* pthread_key / specific Intercept                              */
+/*                                                               */
+/* libunity benutzt in 0x62ea98 einen pro-Thread-Kontext:        */
+/*   pthread_getspecific(key) -> wenn NULL: malloc(368) +        */
+/*   sigaction-Installer + pthread_setspecific(key, obj).        */
+/*   Am Ende: tail-call auf pthread_getspecific fuer die         */
+/*   Rueckgabe. Wenn der Key ungueltig ist oder setspecific      */
+/*   fehlschlaegt, liefert 62ea98 dauerhaft NULL → x19=0 in      */
+/*   nativeSendSurfaceChangedEvent → spaeterer Nullsprung.       */
+/* ------------------------------------------------------------ */
+extern int   __pthread_key_create(pthread_key_t *, void (*)(void *));
+extern int   __pthread_setspecific(pthread_key_t, const void *);
+extern void *__pthread_getspecific(pthread_key_t);
+
+__attribute__((visibility("default")))
+int pthread_key_create(pthread_key_t *key, void (*destructor)(void *)) {
+    extern int __pthread_key_create(pthread_key_t *, void (*)(void *));
+    int r = __pthread_key_create(key, destructor);
+    void *caller = __builtin_return_address(0);
+    LOGI("[pthread_key_create] key=%u destr=%p -> %d (caller=%p)",
+         key ? (unsigned)*key : 0, (void*)destructor, r, caller);
+    return r;
+}
+
+__attribute__((visibility("default")))
+int pthread_setspecific(pthread_key_t key, const void *value) {
+    extern int __pthread_setspecific(pthread_key_t, const void *);
+    int r = __pthread_setspecific(key, value);
+    void *caller = __builtin_return_address(0);
+    LOGI("[pthread_setspecific] key=%u value=%p -> %d (caller=%p)",
+         (unsigned)key, value, r, caller);
+    return r;
+}
+
+__attribute__((visibility("default")))
+void *pthread_getspecific(pthread_key_t key) {
+    extern void *__pthread_getspecific(pthread_key_t);
+    void *v = __pthread_getspecific(key);
+    void *caller = __builtin_return_address(0);
+    LOGI("[pthread_getspecific] key=%u -> %p (caller=%p)",
+         (unsigned)key, v, caller);
+    return v;
 }
 
 /* ------------------------------------------------------------ */
