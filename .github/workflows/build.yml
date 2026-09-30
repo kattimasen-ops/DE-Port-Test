@@ -1,4 +1,4 @@
-name: Build Dead Effect Port
+name: Analyze Dead Effect
 
 on:
   push:
@@ -6,85 +6,752 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  analyze:
     runs-on: ubuntu-latest
-    container:
-      image: ubuntu:20.04
-      options: --privileged
+    timeout-minutes: 90
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Run build.sh
-        shell: bash
-        continue-on-error: true
+      - name: Tools installieren
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            binutils-aarch64-linux-gnu \
+            gcc-aarch64-linux-gnu \
+            gawk \
+            file unzip zip curl wget jq python3 python3-pip \
+            ripgrep less xxd pax-utils
+          pip3 install --quiet lief 2>/dev/null || true
+          aarch64-linux-gnu-objdump --version | head -1
+          gawk --version | head -1
+
+      - name: Verzeichnisse anlegen
+        run: |
+          set -e
+          WS=$GITHUB_WORKSPACE
+          mkdir -p $WS/analysis/deadeffect
+          mkdir -p $WS/analysis/libunity/callees_nssce
+          mkdir -p $WS/analysis/_FLAT
+          mkdir -p $WS/analysis/raw
+
+      - name: Bibliotheken herunterladen
         env:
           DE_LIBS_URL: ${{ secrets.DE_LIBS_URL }}
         run: |
-          set +e
-          chmod +x ./build.sh
-          bash ./build.sh
-          echo "build.sh exit: $?"
+          set -e
+          WS=$GITHUB_WORKSPACE
+          cd $WS/analysis/deadeffect
+          if [ -n "${DE_LIBS_URL:-}" ]; then
+            wget -q -O arm64-v8a.zip "$DE_LIBS_URL"
+          else
+            wget -q -O arm64-v8a.zip \
+              "https://github.com/kattimasen-ops/DE-Port-Test/releases/download/V1/arm64-v8a.zip"
+          fi
+          unzip -o arm64-v8a.zip > /dev/null
+          ls -la
+          ls -la arm64-v8a 2>/dev/null || true
 
-      - name: Diagnose
+      - name: "Phase 0: KNOWN_FACTS.md"
+        run: |
+          set -e
+          WS=$GITHUB_WORKSPACE
+          LIB=$WS/analysis/deadeffect/arm64-v8a/libunity.so
+          OUT=$WS/analysis/_FLAT/02_KNOWN_FACTS.md
+          mkdir -p "$(dirname "$OUT")"
+          {
+            echo "# Bekannte Fakten (libunity)"
+            echo
+            echo "nativeSendSurfaceChangedEvent fnPtr = 0x65bb90"
+            echo "  Callees: 62ea98, 6302f4, 62eb04, 430dc8, 2676c8, 630314"
+            echo "  x19 = Rueckgabe von 62ea98; im Crash x19=0"
+            echo
+            echo "62ea98 nutzt pthread_key bei 16a8000 + 0xad0"
+            echo "  pthread_getspecific -> 0 (erster Aufruf)"
+            echo "  malloc(368) -> sigaction-Installer 0x64578c"
+            echo "  pthread_setspecific(key, P)"
+            echo "  tail-call pthread_getspecific -> Rueckgabe"
+            echo "  Nur 62ea98 ruft den Installer 0x64578c auf."
+            echo
+            echo "nativeRender fnPtr = 0x65bbdc"
+            echo
+            if [ -f "$LIB" ]; then
+              echo "## libunity.so"
+              file "$LIB"
+              stat -c 'Groesse: %s Bytes' "$LIB"
+            fi
+          } > "$OUT"
+          cat "$OUT"
+
+      - name: "Phase 1: libunity/libmain/libil2cpp Basis"
+        run: |
+          set -e
+          WS=$GITHUB_WORKSPACE
+          D=$WS/analysis/deadeffect/arm64-v8a
+          OUT=$WS/analysis/_FLAT/10_summary.txt
+          {
+            echo "=== libmain ==="
+            if [ -f "$D/libmain.so" ]; then
+              file "$D/libmain.so"
+              stat -c 'Groesse: %s' "$D/libmain.so"
+              aarch64-linux-gnu-readelf -h "$D/libmain.so" | grep -E 'Entry|Type|Machine'
+            fi
+            echo
+            echo "=== libunity ==="
+            if [ -f "$D/libunity.so" ]; then
+              file "$D/libunity.so"
+              stat -c 'Groesse: %s' "$D/libunity.so"
+              aarch64-linux-gnu-readelf -h "$D/libunity.so" | grep -E 'Entry|Type|Machine'
+              echo "--- BuildID ---"
+              aarch64-linux-gnu-readelf -n "$D/libunity.so" | grep 'Build ID' || true
+              echo "--- LOAD-Segmente ---"
+              aarch64-linux-gnu-readelf -l "$D/libunity.so" | grep -A1 'LOAD'
+              echo "--- NEEDED ---"
+              aarch64-linux-gnu-readelf -d "$D/libunity.so" | grep NEEDED
+            fi
+            echo
+            echo "=== libil2cpp ==="
+            if [ -f "$D/libil2cpp.so" ]; then
+              file "$D/libil2cpp.so"
+              stat -c 'Groesse: %s' "$D/libil2cpp.so"
+            fi
+          } > "$OUT"
+          cat "$OUT"
+
+      - name: "Phase 2: PLT/GOT & Signal-Slots"
+        run: |
+          set -e
+          WS=$GITHUB_WORKSPACE
+          LIB=$WS/analysis/deadeffect/arm64-v8a/libunity.so
+          FLAT=$WS/analysis/_FLAT
+          if [ ! -f "$LIB" ]; then exit 0; fi
+          {
+            echo "=== Signal-GOT-Slots (.rela.plt) ==="
+            aarch64-linux-gnu-readelf -r "$LIB" | grep -E 'sigaction|sigaltstack|sigemptyset|raise@|kill@|pthread_create@|__cxa_atexit@|pthread_cond_signal@' || true
+            echo
+            echo "=== PLT-Stubs ==="
+            aarch64-linux-gnu-objdump -d "$LIB" | grep -E '<(sigaction|signal|sigaltstack|sigemptyset|raise|kill|pthread_create|pthread_key_create|pthread_setspecific|pthread_getspecific|__cxa_atexit)@plt>:' || true
+          } > "$FLAT/81_signal_slots.txt"
+          cat "$FLAT/81_signal_slots.txt"
+
+      - name: "Phase 3: Callers von sigaction/sigaltstack/raise/kill"
+        run: |
+          set -e
+          WS=$GITHUB_WORKSPACE
+          LIB=$WS/analysis/deadeffect/arm64-v8a/libunity.so
+          FLAT=$WS/analysis/_FLAT
+          RAW=$WS/analysis/raw
+          if [ ! -f "$LIB" ]; then exit 0; fi
+          aarch64-linux-gnu-objdump -d "$LIB" > $RAW/libunity_disasm.txt 2>/dev/null || true
+          {
+            echo "=== sigaction@plt Aufrufer ==="
+            grep -n 'bl.*sigaction@plt' $RAW/libunity_disasm.txt || true
+            echo
+            echo "=== sigaltstack@plt Aufrufer ==="
+            grep -n 'bl.*sigaltstack@plt' $RAW/libunity_disasm.txt || true
+            echo
+            echo "=== raise@plt Aufrufer ==="
+            grep -n 'bl.*raise@plt' $RAW/libunity_disasm.txt || true
+            echo
+            echo "=== kill@plt Aufrufer ==="
+            grep -n 'bl.*kill@plt' $RAW/libunity_disasm.txt || true
+            echo
+            echo "=== pthread_create@plt Aufrufer ==="
+            grep -n 'bl.*pthread_create@plt' $RAW/libunity_disasm.txt || true
+          } > "$FLAT/82_signal_callers.txt"
+          cat "$FLAT/82_signal_callers.txt"
+          {
+            echo "=== Signal-Zusammenfassung ==="
+            echo -n "sigaction: ";   grep -c 'bl.*sigaction@plt'   $RAW/libunity_disasm.txt || true
+            echo -n "sigaltstack: "; grep -c 'bl.*sigaltstack@plt' $RAW/libunity_disasm.txt || true
+            echo -n "raise: ";       grep -c 'bl.*raise@plt'       $RAW/libunity_disasm.txt || true
+            echo -n "kill: ";        grep -c 'bl.*kill@plt'        $RAW/libunity_disasm.txt || true
+          } > "$FLAT/80_signal_summary.txt"
+          cat "$FLAT/80_signal_summary.txt"
+
+      - name: "Phase 4: init_array aufloesen"
+        run: |
+          set -e
+          WS=$GITHUB_WORKSPACE
+          LIB=$WS/analysis/deadeffect/arm64-v8a/libunity.so
+          OUT=$WS/analysis/libunity/init_array.txt
+          if [ ! -f "$LIB" ]; then exit 0; fi
+          {
+            echo "=== init_array ==="
+            aarch64-linux-gnu-readelf -d "$LIB" | grep -E 'INIT_ARRAY|INIT_ARRAYSZ|FINI_ARRAY'
+            echo
+            echo "=== Eintraege ==="
+            aarch64-linux-gnu-readelf -r "$LIB" | grep 'R_AARCH64_RELATIVE' | \
+              gawk '{ off = strtonum($1); if (off >= 0x15c4938 && off < 0x15c5630) print $1, $NF }'
+          } > "$OUT"
+          echo "init_array gespeichert: $(wc -l < $OUT) Zeilen"
+
+      - name: "Phase 5: JNI_OnLoad & Callees"
+        run: |
+          set -e
+          WS=$GITHUB_WORKSPACE
+          LIB=$WS/analysis/deadeffect/arm64-v8a/libunity.so
+          FLAT=$WS/analysis/_FLAT
+          if [ ! -f "$LIB" ]; then exit 0; fi
+          {
+            echo "=== JNI_OnLoad @ 0x65c468 ==="
+            aarch64-linux-gnu-objdump -d --start-address=0x65c468 --stop-address=0x65c520 "$LIB"
+            echo
+            echo "=== Callees (bl xxx) ==="
+            aarch64-linux-gnu-objdump -d --start-address=0x65c468 --stop-address=0x65c644 "$LIB" \
+              | grep -E '\bbl\b' | awk '{print $NF}'
+          } > $WS/analysis/libunity/jni_onload_trace.txt
+          cat $WS/analysis/libunity/jni_onload_trace.txt
+          {
+            echo "=== JNI_OnLoad Callees (konsolidiert) ==="
+            echo "1096370"
+            echo "51e6a4"
+            echo "62e464"
+            echo "62e4d8"
+            echo "62ec44"
+            echo "62ecb8"
+            echo "655ddc"
+            echo "655e50"
+            echo "659538"
+            echo "6595ac"
+            echo "65a300"
+            echo "65a374"
+            echo "65c4f4 (25 Methoden UnityPlayer)"
+            echo "65c564 (1 Methode ChoreographerCallback)"
+            echo "65c5d4 (2 Methoden SwappyDisplayManager)"
+            echo "65c6ac"
+            echo "65c710"
+            echo "65c774"
+          } > "$FLAT/27_jni_onload_trace_callees.txt"
+          cat "$FLAT/27_jni_onload_trace_callees.txt"
+
+      - name: "Phase 6: JNINativeMethod-Aufloesung"
+        run: |
+          set -e
+          WS=$GITHUB_WORKSPACE
+          FLAT=$WS/analysis/_FLAT
+          {
+            printf 'name\tname_va\tjnimethod_off\tfnPtr\n'
+            printf 'deinitCamera2Jni\t0x1227573\t0x161f230\t0x62e460\n'
+            printf 'deinitHFPStatusJni\t0x1229ecc\t0x161f488\t0x655dd8\n'
+            printf 'initJni\t0x122a1fb\t0x161f528\t0x65b8c8\n'
+            printf 'initVrJni\t0x1227693\t0x161f278\t0x62eb7c\n'
+            printf 'initializeARCore\t0x122a0cc\t0x161f4c8\t0x65b35c\n'
+            printf 'isQuiting\t0x12276b8\t0x161f2a8\t0x62ebd0\n'
+            printf 'nativeApplicationUnload\t0x122a2b1\t0x161f5e8\t0x65ba80\n'
+            printf 'nativeDone\t0x122a220\t0x161f540\t0x65b930\n'
+            printf 'nativeFocusChanged\t0x122a2c9\t0x161f600\t0x65bac4\n'
+            printf 'nativeFrameReady\t0x1227584\t0x161f248\t0x635458\n'
+            printf 'nativeInjectEvent\t0x122a143\t0x161f6d8\t0x65bc30\n'
+            printf 'nativeIsAutorotationOn\t0x122a3f1\t0x161f708\t0x65c20c\n'
+            printf 'nativeLowMemory\t0x122a2a1\t0x161f5d0\t0x65ba44\n'
+            printf 'nativeMuteMasterAudio\t0x122a408\t0x161f720\t0x65c268\n'
+            printf 'nativeOrientationChanged\t0x122a43d\t0x161f768\t0x65c414\n'
+            printf 'nativePause\t0x122a22b\t0x161f558\t0x65b9b0\n'
+            printf 'nativeProxyFinalize\t0x11b76f4\t0x16186a8\t0x29888c\n'
+            printf 'nativeProxyInvoke\t0x11b76a7\t0x1618690\t0x298754\n'
+            printf 'nativeProxyLogJNIInvokeException\t0x11b770d\t0x16186c0\t0x2988d4\n'
+            printf 'nativeRecreateGfxState\t0x122a237\t0x161f570\t0x65bb2c\n'
+            printf 'nativeRender\t0x122a287\t0x161f5a0\t0x65bbdc\n'
+            printf 'nativeReportKeyboardConfigChanged\t0x122a358\t0x161f6a8\t0x65bfe8\n'
+            printf 'nativeRestartActivityIndicator\t0x122a41e\t0x161f738\t0x65c2c0\n'
+            printf 'nativeResume\t0x122a294\t0x161f5b8\t0x65ba08\n'
+            printf 'nativeSendSurfaceChangedEvent\t0x122a269\t0x161f588\t0x65bb90\n'
+            printf 'nativeSetInputArea\t0x122a2dc\t0x161f618\t0x65bd8c\n'
+            printf 'nativeSetInputSelection\t0x122a312\t0x161f660\t0x65bf04\n'
+            printf 'nativeSetInputString\t0x122a155\t0x161f648\t0x65be54\n'
+            printf 'nativeSetKeyboardIsVisible\t0x122a2f7\t0x161f630\t0x65be00\n'
+            printf 'nativeSetLaunchURL\t0x122a16a\t0x161f750\t0x65c2fc\n'
+            printf 'nativeSoftInputCanceled\t0x122a340\t0x161f690\t0x65bf60\n'
+            printf 'nativeSoftInputClosed\t0x122a32a\t0x161f678\t0x65c024\n'
+            printf 'nativeSoftInputLostFocus\t0x122a37a\t0x161f6c0\t0x65bfa4\n'
+            printf 'nativeSurfaceTextureReady\t0x12275d2\t0x161f260\t0x6352f4\n'
+            printf 'nativeUnitySendMessage\t0x122a3b0\t0x161f6f0\t0x65c068\n'
+            printf 'onAudioVolumeChanged\t0x122a0b7\t0x161f4b0\t0x6594e8\n'
+            printf 'pauseARCore\t0x122a0f7\t0x161f4e0\t0x65b3c0\n'
+            printf 'resumeARCore\t0x122a103\t0x161f4f8\t0x65b408\n'
+            printf 'setVrVideoTransform\t0x122769d\t0x161f290\t0x62e93c\n'
+          } > "$FLAT/20_native_methods_extended.txt"
+          cp "$FLAT/20_native_methods_extended.txt" "$FLAT/21_native_methods_basic.txt"
+          echo "JNI-Methoden gespeichert: $(wc -l < $FLAT/20_native_methods_extended.txt) Zeilen"
+
+      - name: "Phase 7: blr/br xN in nativen Funktionen"
+        run: |
+          set -e
+          WS=$GITHUB_WORKSPACE
+          LIB=$WS/analysis/deadeffect/arm64-v8a/libunity.so
+          FLAT=$WS/analysis/_FLAT
+          if [ ! -f "$LIB" ]; then exit 0; fi
+          {
+            echo "=== 62ea98 (Pro-Thread-Kontext) ==="
+            aarch64-linux-gnu-objdump -d --start-address=0x62ea98 --stop-address=0x62eb04 "$LIB"
+          } > "$FLAT/22_nssce_callees.txt"
+          cat "$FLAT/22_nssce_callees.txt"
+          {
+            echo "=== nativeSendSurfaceChangedEvent @ 0x65bb90 (Dispatchers) ==="
+            aarch64-linux-gnu-objdump -d --start-address=0x65bb90 --stop-address=0x65bbdc "$LIB" \
+              | grep -E 'br[[:space:]]+x|blr[[:space:]]+x|cbz|cbnz' || echo "(keine)"
+          } > "$FLAT/23_nssce_dispatchers.txt"
+          cat "$FLAT/23_nssce_dispatchers.txt"
+          aarch64-linux-gnu-objdump -d --start-address=0x65bb90 --stop-address=0x65bbdc "$LIB" \
+            > "$FLAT/24_nssce_nativeRender.txt" 2>/dev/null || true
+          aarch64-linux-gnu-objdump -d --start-address=0x65bb00 --stop-address=0x65c700 "$LIB" \
+            > "$FLAT/25_nssce_full.txt" 2>/dev/null || true
+
+      - name: "Phase 8: LIEF"
+        run: |
+          set -e
+          WS=$GITHUB_WORKSPACE
+          LIB=$WS/analysis/deadeffect/arm64-v8a/libunity.so
+          OUT=$WS/analysis/libunity/lief_summary.txt
+          if [ ! -f "$LIB" ]; then exit 0; fi
+          cat > /tmp/lief_analyze.py <<'PYEOF'
+          import os, sys
+          try:
+              import lief
+          except Exception as e:
+              print("lief not available:", e)
+              sys.exit(0)
+          path = os.environ.get("LIB_PATH", "")
+          if not path or not os.path.exists(path):
+              print("LIB_PATH not set or file missing:", path)
+              sys.exit(0)
+          lib = lief.parse(path)
+          if lib is None:
+              print("lief.parse returned None")
+              sys.exit(0)
+          print("Format:", lib.header.file_type)
+          print("Machine:", lib.header.machine_type)
+          print("Entry:", hex(lib.entrypoint))
+          print("Sections:")
+          for s in lib.sections:
+              print("  %-20s vaddr=0x%x size=0x%x" % (s.name, s.virtual_address, s.size))
+          print("Dynamic entries:")
+          for e in lib.dynamic_entries:
+              print("  %s = %s" % (e.tag, e.value))
+          try:
+              syms = list(lib.dynamic_symbols)
+              print("Dynamic symbols count:", len(syms))
+          except Exception as ex:
+              print("symbols error:", ex)
+          try:
+              rel = list(lib.relocations)
+              print("Relocations count:", len(rel))
+          except Exception as ex:
+              print("relocations error:", ex)
+          PYEOF
+          LIB_PATH="$LIB" python3 /tmp/lief_analyze.py > "$OUT" 2>&1 || true
+          head -60 "$OUT"
+
+      - name: "Phase 9: radare2 (optional)"
+        run: |
+          set -e
+          WS=$GITHUB_WORKSPACE
+          LIB=$WS/analysis/deadeffect/arm64-v8a/libunity.so
+          OUT=$WS/analysis/libunity/radare2_summary.txt
+          if ! command -v r2 >/dev/null 2>&1; then
+            echo "radare2 nicht installiert - ueberspringe" > "$OUT"
+            exit 0
+          fi
+          if [ ! -f "$LIB" ]; then exit 0; fi
+          r2 -q -c 'iI; iS; ii' "$LIB" > "$OUT" 2>&1 || true
+          head -40 "$OUT"
+
+      - name: "Phase 10: pax-utils"
+        run: |
+          set -e
+          WS=$GITHUB_WORKSPACE
+          LIB=$WS/analysis/deadeffect/arm64-v8a/libunity.so
+          OUT=$WS/analysis/libunity/paxutils.txt
+          if [ ! -f "$LIB" ]; then exit 0; fi
+          if command -v scanelf >/dev/null 2>&1; then
+            scanelf -a "$LIB" > "$OUT" 2>&1 || true
+          elif command -v dumpelf >/dev/null 2>&1; then
+            dumpelf "$LIB" > "$OUT" 2>&1 || true
+          else
+            echo "pax-utils nicht verfuegbar" > "$OUT"
+          fi
+          head -20 "$OUT"
+
+      - name: "Phase 11: libunity-Logs konsolidieren"
+        run: |
+          set -e
+          WS=$GITHUB_WORKSPACE
+          LIB=$WS/analysis/deadeffect/arm64-v8a/libunity.so
+          FLAT=$WS/analysis/_FLAT
+          RAW=$WS/analysis/raw
+          if [ ! -f "$LIB" ]; then exit 0; fi
+          if [ ! -f "$RAW/libunity_disasm.txt" ]; then
+            aarch64-linux-gnu-objdump -d "$LIB" > "$RAW/libunity_disasm.txt" 2>/dev/null || true
+          fi
+          {
+            echo "=========================================="
+            echo "  LIBUNITY - KONSOLIDIERTE LOGS"
+            echo "=========================================="
+            echo
+            echo "### 1. Datei-Metadaten"
+            file "$LIB"
+            stat -c 'Groesse: %s' "$LIB"
+            echo
+            echo "### 2. init_array"
+            aarch64-linux-gnu-readelf -d "$LIB" | grep -E 'INIT_ARRAY|INIT_ARRAYSZ'
+            echo
+            echo "### 3. Signal-Slots (.rela.plt)"
+            aarch64-linux-gnu-readelf -r "$LIB" | grep -E 'R_AARCH64_JUMP_SLOT' | grep -E 'sigaction|sigemptyset|sigaltstack|raise@|kill@|pthread_create@|pthread_cond_signal@|__cxa_atexit@' || true
+            echo
+            echo "### 4. sigaction@plt Aufrufer"
+            grep -B1 'bl.*sigaction@plt' "$RAW/libunity_disasm.txt" | head -40 || true
+            echo
+            echo "### 5. sigaltstack@plt Aufrufer"
+            grep -B1 'bl.*sigaltstack@plt' "$RAW/libunity_disasm.txt" | head -40 || true
+            echo
+            echo "### 6. raise@plt Aufrufer"
+            grep -B1 'bl.*raise@plt' "$RAW/libunity_disasm.txt" | head -20 || true
+            echo
+            echo "### 7. kill@plt Aufrufer"
+            grep -B1 'bl.*kill@plt' "$RAW/libunity_disasm.txt" | head -20 || true
+            echo
+            echo "### 8. pthread_create@plt Aufrufer"
+            grep -B1 'bl.*pthread_create@plt' "$RAW/libunity_disasm.txt" | head -30 || true
+          } > "$FLAT/11_libunity_all.txt"
+          echo "libunity_all.txt: $(wc -l < $FLAT/11_libunity_all.txt) Zeilen"
+
+      - name: "Phase 12: Gesamt-Zusammenfassung"
+        run: |
+          set -e
+          WS=$GITHUB_WORKSPACE
+          FLAT=$WS/analysis/_FLAT
+          {
+            echo "=== ANALYSE-ZUSAMMENFASSUNG ==="
+            echo "Datum: $(date -u)"
+            echo
+            echo "Dateien in _FLAT:"
+            ls -la "$FLAT"
+            echo
+            echo "Raw-Verzeichnis:"
+            ls -la "$WS/analysis/raw" 2>/dev/null || true
+            echo
+            echo "libunity-Verzeichnis:"
+            ls -la "$WS/analysis/libunity" 2>/dev/null || true
+          } > "$FLAT/00_MANIFEST.txt"
+          cat "$FLAT/00_MANIFEST.txt"
+
+      - name: "Phase 13: Callees von nativeSendSurfaceChangedEvent"
+        run: |
+          set -e
+          WS=$GITHUB_WORKSPACE
+          LIB=$WS/analysis/deadeffect/arm64-v8a/libunity.so
+          FLAT=$WS/analysis/_FLAT
+          if [ ! -f "$LIB" ]; then exit 0; fi
+          {
+            echo "=== nativeSendSurfaceChangedEvent @ 0x65bb90 ==="
+            aarch64-linux-gnu-objdump -d --start-address=0x65bb90 --stop-address=0x65bbdc "$LIB"
+            echo
+            echo "=== Callees (bl) ==="
+            aarch64-linux-gnu-objdump -d --start-address=0x65bb90 --stop-address=0x65bbdc "$LIB" \
+              | grep -E '\bbl\b' | awk '{print $NF}'
+          } > "$FLAT/22_nssce_callees.txt"
+          cat "$FLAT/22_nssce_callees.txt"
+
+      - name: "Phase 13b: Refs auf 16a8ad0 / pthread_key_create"
+        run: |
+          set -e
+          WS=$GITHUB_WORKSPACE
+          LIB=$WS/analysis/deadeffect/arm64-v8a/libunity.so
+          FLAT=$WS/analysis/_FLAT
+          RAW=$WS/analysis/raw
+          if [ ! -f "$LIB" ]; then exit 0; fi
+          if [ ! -f "$RAW/libunity_disasm.txt" ]; then
+            aarch64-linux-gnu-objdump -d "$LIB" > "$RAW/libunity_disasm.txt" 2>/dev/null || true
+          fi
+          {
+            echo "=========================================="
+            echo "  REFS auf 16a8ad0 / pthread_key_create"
+            echo "=========================================="
+            echo
+            echo "--- pthread_key_create@plt Aufrufe ---"
+            grep -B1 'bl.*pthread_key_create@plt' "$RAW/libunity_disasm.txt" | head -60 || true
+            echo
+            echo "--- pthread_getspecific@plt Aufrufe (Top 200) ---"
+            grep -B1 'bl.*pthread_getspecific@plt' "$RAW/libunity_disasm.txt" | head -200 || true
+            echo
+            echo "--- pthread_setspecific@plt Aufrufe (Top 200) ---"
+            grep -B1 'bl.*pthread_setspecific@plt' "$RAW/libunity_disasm.txt" | head -200 || true
+            echo
+            echo "--- adrp xN, 16a8000 (Basis fuer #2768) ---"
+            grep -A1 'adrp.*16a8000' "$RAW/libunity_disasm.txt" | grep -B1 '#2768' | head -60 || true
+          } > "$FLAT/26_refs_16a8ad0.txt"
+          echo "refs_16a8ad0.txt: $(wc -l < $FLAT/26_refs_16a8ad0.txt) Zeilen"
+
+      - name: "Phase 13c: Installer 0x64578c disassemblieren"
+        run: |
+          set -e
+          WS=$GITHUB_WORKSPACE
+          LIB=$WS/analysis/deadeffect/arm64-v8a/libunity.so
+          OUT_FLAT=$WS/analysis/_FLAT/28_installer_64578c.txt
+          OUT_RAW=$WS/analysis/libunity/callees_nssce/installer_64578c.txt
+          mkdir -p "$(dirname "$OUT_RAW")"
+          if [ ! -f "$LIB" ]; then
+            echo "(libunity.so nicht vorhanden)" > "$OUT_FLAT"
+            exit 0
+          fi
+          OBJDUMP=aarch64-linux-gnu-objdump
+          {
+            echo "=========================================="
+            echo "  libunity.so @ 0x64578c - sigaction-Installer"
+            echo "=========================================="
+            echo
+            echo "### Vollstaendige Disassembly 0x64578c - 0x645a80"
+            $OBJDUMP -d --start-address=0x64578c --stop-address=0x645a80 "$LIB"
+            echo
+            echo "### Alle br/blr/cbz/cbnz/ret/bl im Bereich"
+            $OBJDUMP -d --start-address=0x64578c --stop-address=0x645a80 "$LIB" \
+              | grep -E 'br[[:space:]]+x|blr[[:space:]]+x|cbz|cbnz|ret|bl[[:space:]]'
+            echo
+            echo "### xrefs auf 64578c (Aufrufer)"
+            $OBJDUMP -d "$LIB" 2>/dev/null | grep -B2 -E 'bl[[:space:]]+64578c' | head -60
+            echo
+            echo "### Kontext um 62eae4 (Aufrufstelle des Installers)"
+            $OBJDUMP -d --start-address=0x62ead0 --stop-address=0x62eb04 "$LIB"
+            echo
+            echo "### Detail 645850 - 645950"
+            $OBJDUMP -d --start-address=0x645850 --stop-address=0x645950 "$LIB"
+          } > "$OUT_RAW"
+          cp "$OUT_RAW" "$OUT_FLAT"
+          echo "installer_64578c.txt erzeugt: $(wc -l < $OUT_FLAT) Zeilen"
+          head -80 "$OUT_FLAT"
+
+      - name: "Phase 14: JNI_OnLoad Callees tiefer"
+        run: |
+          set -e
+          WS=$GITHUB_WORKSPACE
+          LIB=$WS/analysis/deadeffect/arm64-v8a/libunity.so
+          FLAT=$WS/analysis/_FLAT
+          if [ ! -f "$LIB" ]; then exit 0; fi
+          {
+            echo "=== JNI_OnLoad Callees (Detail) ==="
+            for addr in 1096370 51e6a4 62e464 62e4d8 62ec44 62ecb8 655ddc 655e50 659538 6595ac 65a300 65a374 65c4f4 65c564 65c5d4 65c6ac 65c710 65c774; do
+              echo "--- $addr ---"
+              aarch64-linux-gnu-objdump -d --start-address=0x$addr --stop-address=$((0x$addr + 0x100)) "$LIB" 2>/dev/null | head -30 || true
+              echo
+            done
+          } > "$FLAT/31_jni_onload_trace.txt"
+          {
+            echo "=== JNI_OnLoad RegisterNatives Aufrufe ==="
+            aarch64-linux-gnu-objdump -d "$LIB" 2>/dev/null | grep -E 'bl.*65c4f4|bl.*65c564|bl.*65c5d4' | head -30
+          } > "$FLAT/30_jni_onload_summary.txt"
+          cat "$FLAT/30_jni_onload_summary.txt"
+
+      - name: "Phase 15: Alle JNI-Aufrufstellen"
+        run: |
+          set -e
+          WS=$GITHUB_WORKSPACE
+          LIB=$WS/analysis/deadeffect/arm64-v8a/libunity.so
+          FLAT=$WS/analysis/_FLAT
+          if [ ! -f "$LIB" ]; then exit 0; fi
+          {
+            echo "=== JNI-Aufrufe ==="
+            aarch64-linux-gnu-objdump -d "$LIB" 2>/dev/null | grep -E 'FindClass|GetMethodID|GetStaticMethodID|CallObjectMethod|CallStaticObjectMethod|NewStringUTF|RegisterNatives' | head -200
+          } > "$FLAT/41_jni_callsites_full.txt"
+          {
+            echo "=== JNI-Aufrufe Zusammenfassung ==="
+            echo -n "FindClass: ";        grep -c 'FindClass'        "$FLAT/41_jni_callsites_full.txt" 2>/dev/null || echo 0
+            echo -n "GetMethodID: ";      grep -c 'GetMethodID'      "$FLAT/41_jni_callsites_full.txt" 2>/dev/null || echo 0
+            echo -n "GetStaticMethodID: "; grep -c 'GetStaticMethodID' "$FLAT/41_jni_callsites_full.txt" 2>/dev/null || echo 0
+            echo -n "RegisterNatives: ";  grep -c 'RegisterNatives'  "$FLAT/41_jni_callsites_full.txt" 2>/dev/null || echo 0
+          } > "$FLAT/40_jni_callsites_summary.txt"
+          cat "$FLAT/40_jni_callsites_summary.txt"
+
+      - name: "Phase 16: EGL + Android-Bionic Aufrufstellen"
+        run: |
+          set -e
+          WS=$GITHUB_WORKSPACE
+          LIB=$WS/analysis/deadeffect/arm64-v8a/libunity.so
+          FLAT=$WS/analysis/_FLAT
+          if [ ! -f "$LIB" ]; then exit 0; fi
+          {
+            echo "=== EGL + ANativeWindow + ASensor + ALooper + Bionic ==="
+            aarch64-linux-gnu-objdump -d "$LIB" 2>/dev/null | grep -E 'bl.*@plt' | \
+              grep -E 'egl|GLES|ANativeWindow|ASensor|ALooper|android_set_abort|system_property|__FD_' | head -200
+          } > "$FLAT/51_egl_callsites_full.txt"
+          {
+            echo "=== EGL/Bionic Zusammenfassung ==="
+            wc -l "$FLAT/51_egl_callsites_full.txt"
+            echo "---"
+            grep -oE '<[^>]+@plt>' "$FLAT/51_egl_callsites_full.txt" 2>/dev/null | sort | uniq -c | sort -rn | head -40
+          } > "$FLAT/50_egl_callsites_summary.txt"
+          cat "$FLAT/50_egl_callsites_summary.txt"
+
+      - name: "Phase 17: Erweiterter blr/br xN Sweep"
+        run: |
+          set -e
+          WS=$GITHUB_WORKSPACE
+          LIB=$WS/analysis/deadeffect/arm64-v8a/libunity.so
+          FLAT=$WS/analysis/_FLAT
+          RAW=$WS/analysis/raw
+          if [ ! -f "$LIB" ]; then exit 0; fi
+          if [ ! -f "$RAW/libunity_disasm.txt" ]; then
+            aarch64-linux-gnu-objdump -d "$LIB" > "$RAW/libunity_disasm.txt" 2>/dev/null || true
+          fi
+          DISASM=$RAW/libunity_disasm.txt
+          {
+            echo "=== Indirekte Aufrufe nach Register ==="
+            for reg in x0 x1 x2 x3 x4 x5 x6 x7 x8 x9 x10 x11 x12 x13 x14 x15 x16 x17 x18 x19 x20 x21 x22 x23 x24 x25 x26 x27 x28 x29; do
+              cnt=$(grep -cE "blr[[:space:]]+$reg\b|br[[:space:]]+$reg\b" "$DISASM" 2>/dev/null || echo 0)
+              echo "$reg $cnt"
+            done | sort -k2 -n -r
+          } > "$FLAT/61_indirect_by_register.txt"
+          head -20 "$FLAT/61_indirect_by_register.txt"
+          {
+            echo "=== x8 (vtable-Dispatches) ==="
+            grep -E 'ldr[[:space:]]+x8,[[:space:]]*\[' "$DISASM" 2>/dev/null | head -50
+            echo
+            echo "=== x0 (vtable mit NULL-Check) ==="
+            grep -B1 -E 'br[[:space:]]+x0\b' "$DISASM" 2>/dev/null | head -80
+          } > "$FLAT/62_indirect_x0_to_x15.txt"
+          {
+            echo "=== Zusammenfassung ==="
+            grep -cE 'blr[[:space:]]+x[0-9]+|br[[:space:]]+x[0-9]+' "$DISASM" 2>/dev/null || echo 0
+          } > "$FLAT/60_indirect_sweep_summary.txt"
+          cat "$FLAT/60_indirect_sweep_summary.txt"
+
+      - name: "Phase 18: RELATIVE Reloc Index"
+        run: |
+          set -e
+          WS=$GITHUB_WORKSPACE
+          LIB=$WS/analysis/deadeffect/arm64-v8a/libunity.so
+          FLAT=$WS/analysis/_FLAT
+          RAW=$WS/analysis/raw
+          if [ ! -f "$LIB" ]; then exit 0; fi
+          aarch64-linux-gnu-readelf -r "$LIB" > "$RAW/all_relocs_full.txt" 2>/dev/null || true
+          {
+            echo "=== Reloc-Typen-Haeufigkeit ==="
+            grep -oE 'R_AARCH64_[A-Z0-9_]+' "$RAW/all_relocs_full.txt" | sort | uniq -c | sort -rn
+          } > "$FLAT/70_reloc_summary.txt"
+          cat "$FLAT/70_reloc_summary.txt"
+          {
+            echo "=== RELATIVE-Relocs nach Ziel-Bereich ==="
+            grep 'R_AARCH64_RELATIVE' "$RAW/all_relocs_full.txt" | gawk '{
+              off = strtonum($1);
+              if (off < 0x15c4938) sec="text_or_earlier";
+              else if (off < 0x15c6000) sec="rodata_init";
+              else if (off < 0x15d0000) sec="data_rel_ro";
+              else if (off < 0x1610000) sec="data_or_bss";
+              else sec="late";
+              print sec
+            }' | sort | uniq -c | sort -rn
+          } > "$FLAT/71_reloc_by_target_section.txt"
+          cat "$FLAT/71_reloc_by_target_section.txt"
+          {
+            echo "=== RELATIVE-Relocs nach Offset-Section ==="
+            grep 'R_AARCH64_RELATIVE' "$RAW/all_relocs_full.txt" | gawk '{
+              off = strtonum($1);
+              if (off < 0x15c4938) sec="before_init_array";
+              else if (off < 0x15c6000) sec="init_array_region";
+              else if (off < 0x15d0000) sec="data_rel_ro_region";
+              else if (off < 0x1610000) sec="data_region";
+              else sec="late_region";
+              print sec
+            }' | sort | uniq -c | sort -rn
+          } > "$FLAT/72_reloc_by_offset_section.txt"
+          cat "$FLAT/72_reloc_by_offset_section.txt"
+
+      - name: "Phase 19: Native-Methoden-Metadaten"
+        run: |
+          set -e
+          WS=$GITHUB_WORKSPACE
+          LIB=$WS/analysis/deadeffect/arm64-v8a/libunity.so
+          FLAT=$WS/analysis/_FLAT
+          if [ ! -f "$LIB" ]; then exit 0; fi
+          {
+            echo "=== JNI-Klassen (Strings) ==="
+            strings -a "$LIB" | grep -E '^(com/unity3d|android/|java/|com/google)' | sort -u | head -200
+          } > "$FLAT/90_jni_classes.txt"
+          {
+            echo "=== JNI-Signaturen (Strings) ==="
+            strings -a "$LIB" | grep -E '^\(.*\)' | head -200
+          } > "$FLAT/91_jni_signatures.txt"
+
+      - name: "Phase 20: Knowledge Base"
+        run: |
+          set -e
+          WS=$GITHUB_WORKSPACE
+          FLAT=$WS/analysis/_FLAT
+          {
+            echo "# Knowledge Base Dead Effect Analyse"
+            echo
+            echo "## Wichtige Adressen (statisch, libunity.so)"
+            echo "- JNI_OnLoad: 0x65c468"
+            echo "- nativeSendSurfaceChangedEvent: 0x65bb90"
+            echo "- nativeRender: 0x65bbdc"
+            echo "- initJni: 0x65b8c8"
+            echo "- 62ea98: pro-Thread-Kontext-Handler"
+            echo "- 64578c: sigaction-Installer (Aufrufer 62eae4)"
+            echo "- 16a8ad0: pthread-Key-Slot (BSS)"
+            echo
+            echo "## Empirische Beobachtungen"
+            echo "- pthread_getspecific(key=15) liefert NULL beim ersten Aufruf"
+            echo "- Installer 64578c durchlaeuft 7 Signale"
+            echo "- Crash PC=0x0 LR=0x0 nach letztem sigaction-BLOCKIERT"
+            echo "- pthread_setspecific(key=15, ...) fehlt im Log"
+            echo
+            echo "## Hypothese"
+            echo "Der Installer 0x64578c endet mit einem br xN mit xN=0,"
+            echo "bevor pthread_setspecific in 62ea98 erreicht wird."
+          } > "$FLAT/01_KNOWLEDGE_BASE.md"
+          cat "$FLAT/01_KNOWLEDGE_BASE.md"
+
+      - name: "Phase 21: _FLAT Konsolidierung"
+        run: |
+          set -e
+          WS=$GITHUB_WORKSPACE
+          FLAT=$WS/analysis/_FLAT
+          LIB=$WS/analysis/deadeffect/arm64-v8a/libunity.so
+          for f in 22_nssce_callees 23_nssce_dispatchers 24_nssce_nativeRender 25_nssce_full \
+                   80_signal_summary 81_signal_slots 82_signal_callers 28_installer_64578c; do
+            [ -f "$FLAT/$f.txt" ] || echo "(nicht erzeugt: $f)" > "$FLAT/$f.txt"
+          done
+          if [ -f "$LIB" ]; then
+            aarch64-linux-gnu-nm -D --undefined-only "$LIB" > "$FLAT/92_imported_symbols.txt" 2>&1 || true
+            aarch64-linux-gnu-nm -D --defined-only   "$LIB" > "$FLAT/93_exported_symbols.txt" 2>&1 || true
+          fi
+          {
+            echo "=== Fehler und Notizen ==="
+            echo "Workflow-Lauf: $(date -u)"
+            echo "Anzahl _FLAT-Dateien: $(ls "$FLAT" | wc -l)"
+            echo
+            ls -la "$FLAT"
+          } > "$FLAT/99_errors_and_notes.txt"
+          {
+            echo "=== _FLAT MANIFEST ==="
+            echo "Erzeugt: $(date -u)"
+            echo
+            ls -la "$FLAT"
+          } > "$FLAT/00_MANIFEST.txt"
+          echo "=== _FLAT Inhalt ==="
+          ls -la "$FLAT"
+
+      - name: Upload Analyse-Artefakt
         if: always()
-        shell: bash
+        uses: actions/upload-artifact@v4
+        with:
+          name: deadeffect-analysis
+          path: analysis/
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Diagnose (immer)
+        if: always()
         run: |
           set +e
-          echo "=== Workspace ==="
-          ls -la "$GITHUB_WORKSPACE"
-          echo ""
-          echo "=== work/ ==="
-          ls -la "$GITHUB_WORKSPACE/work" 2>/dev/null || echo "(kein work/)"
-          echo ""
-          echo "=== work/build_src/ ==="
-          ls -la "$GITHUB_WORKSPACE/work/build_src" 2>/dev/null || echo "(kein build_src/)"
-          echo ""
-          echo "=== Loader-Binary Info ==="
-          LD="$GITHUB_WORKSPACE/work/build_src/deadeffect-loader"
-          if [ -f "$LD" ]; then
-            file "$LD"
-            stat -c 'Groesse: %s Bytes' "$LD"
-            echo "--- DT_NEEDED ---"
-            readelf -d "$LD" 2>/dev/null | grep NEEDED || true
-            echo "--- Undefined Symbols (Top 60) ---"
-            aarch64-linux-gnu-nm -D --undefined-only "$LD" 2>/dev/null | head -60 || true
-            echo "--- Exportierte Kern-Symbole (Sanity) ---"
-            aarch64-linux-gnu-nm "$LD" 2>/dev/null | grep -E ' T (slCreateEngine|jni_find_native|jni_dump_natives|so_load)$' || true
-          else
-            echo "(deadeffect-loader nicht vorhanden)"
-          fi
-          echo ""
-          echo "=== Port-Paket-Struktur ==="
-          find "$GITHUB_WORKSPACE/work/port" -maxdepth 3 -type f 2>/dev/null | sort || true
-          echo ""
-          echo "=== Tail build.log ==="
-          tail -80 "$GITHUB_WORKSPACE/work/build.log" 2>/dev/null || echo "(kein log)"
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: DeadEffect-Port
-          path: DeadEffect-Port.zip
-          if-no-files-found: warn
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: build-log
-          path: work/build.log
-          if-no-files-found: warn
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: undefined-symbols
-          path: work/undefined_symbols.txt
-          if-no-files-found: warn
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: jni-meta
-          path: work/jni_meta/
-          if-no-files-found: warn
+          WS=$GITHUB_WORKSPACE
+          echo "=== _FLAT ==="
+          ls -la $WS/analysis/_FLAT 2>/dev/null || echo "(leer)"
+          echo
+          echo "=== 28_installer_64578c.txt (Kopf) ==="
+          head -60 $WS/analysis/_FLAT/28_installer_64578c.txt 2>/dev/null || echo "(fehlt)"
+          echo
+          echo "=== 92_imported_symbols.txt (Kopf) ==="
+          head -20 $WS/analysis/_FLAT/92_imported_symbols.txt 2>/dev/null || echo "(fehlt)"
