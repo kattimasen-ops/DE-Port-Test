@@ -16,6 +16,14 @@
 #include <dirent.h>
 #include <android/log.h>
 
+/* glibc definiert sa_handler und sa_sigaction als Makros auf
+ * __sigaction_handler.sa_handler / .sa_sigaction. Wir brauchen
+ * die Namen als echte Feldnamen in unserem Bionic-Layout, daher
+ * muessen die Makros hier weg. */
+#undef  sa_handler
+#undef  sa_sigaction
+#undef  sa_restorer
+
 #undef stat
 #undef lstat
 #undef fstat
@@ -70,10 +78,6 @@ int __android_log_write(int prio, const char *tag, const char *text) {
 /*                                                              */
 /* Bionic "sigset_t" = 8 Bytes (1 x unsigned long).             */
 /* glibc  "sigset_t" = 128 Bytes.                               */
-/*                                                              */
-/* libunity wurde gegen bionic gebaut; wir muessen daher        */
-/* bionic-Semantik liefern, auch wenn unser Loader gegen glibc  */
-/* linkt.                                                       */
 /* ============================================================ */
 struct de_bionic_sigaction {
     void     *sa_handler;   /* union mit sa_sigaction */
@@ -97,7 +101,6 @@ static int is_protected_signal(int sig) {
            sig == SIGFPE  || sig == SIGABRT;
 }
 
-/* Kern-Syscall mit korrekter Layout-Uebersetzung.              */
 static int de_rt_sigaction_translate(int signum,
                                      const struct de_bionic_sigaction *bact,
                                      struct de_bionic_sigaction       *bold)
@@ -183,8 +186,6 @@ sighandler_t de_signal(int signum, sighandler_t handler) {
 /* 120 Bytes Stack und zerstoert damit x19/x20/x21/x22/x30 in   */
 /* 64578c. Der Epilog `ldp x19,x30; ret` springt dann mit       */
 /* x30=0 nach PC=0 — exakt das Crash-Bild.                      */
-/*                                                              */
-/* Diese hier schreiben ausschliesslich 8 Bytes.                */
 /* ============================================================ */
 __attribute__((visibility("default")))
 int sigemptyset(sigset_t *set) {
